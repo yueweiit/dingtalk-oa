@@ -155,6 +155,9 @@ export async function searchInstances(params: {
     body,
   });
 
+  // 调试：打印 API 响应结构
+  console.log('[ApiClient] searchInstances 响应:', JSON.stringify(data).slice(0, 500));
+
   const parsed = searchInstancesResponseSchema.parse(data);
   return parsed.result;
 }
