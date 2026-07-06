@@ -140,7 +140,7 @@ async function backfillTemplate(params: {
   });
 
   try {
-    let nextToken: string | undefined;
+    let nextToken: string | number | undefined;
     let totalProcessed = 0;
     let pageCount = 0;
     const startTime = Date.now();
