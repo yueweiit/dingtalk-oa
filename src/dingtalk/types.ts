@@ -37,7 +37,7 @@ export const approvalInstanceSchema = z.object({
 export const searchInstancesResponseSchema = z.object({
   result: z.object({
     list: z.array(approvalInstanceSchema),
-    totalCount: z.number(),
+    totalCount: z.number().optional(),
     nextToken: z.union([z.string(), z.number()]).optional(),
   }),
 });

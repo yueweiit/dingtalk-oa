@@ -141,7 +141,7 @@ export async function searchInstances(params: {
   endTime: Date;
   nextToken?: string | number;
   size?: number;
-}): Promise<{ list: ApprovalInstance[]; totalCount: number; nextToken?: string | number }> {
+}): Promise<{ list: ApprovalInstance[]; totalCount?: number; nextToken?: string | number }> {
   const body: Record<string, unknown> = {
     processCode: params.processCode,
     startTime: params.startTime.getTime(),
