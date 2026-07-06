@@ -134,7 +134,7 @@ export async function countByProcessCode(corp_id: string, process_code: string):
 
 export async function findAnyOriginatorUserId(): Promise<string | null> {
   return withClient(async (client) => {
-    // 优先从审批实例取（该用户肯定有 OA 权限）
+    // 优先从审批实例取（该用户肯定有 OA 审批权限）
     const { rows } = await client.query<{ originator_user_id: string }>(
       `SELECT originator_user_id FROM ding_approval_instance
        WHERE originator_user_id IS NOT NULL AND originator_user_id != ''
@@ -142,7 +142,15 @@ export async function findAnyOriginatorUserId(): Promise<string | null> {
     );
     if (rows[0]?.originator_user_id) return rows[0].originator_user_id;
 
-    // 兜底：从用户快照取
+    // 兜底：从审批任务取（审批人也有 OA 权限）
+    const { rows: taskRows } = await client.query<{ approver_user_id: string }>(
+      `SELECT approver_user_id FROM ding_approval_task
+       WHERE approver_user_id IS NOT NULL AND approver_user_id != ''
+       LIMIT 1`
+    );
+    if (taskRows[0]?.approver_user_id) return taskRows[0].approver_user_id;
+
+    // 最后兜底：从用户快照取（不一定有 OA 审批权限）
     const { rows: userRows } = await client.query<{ user_id: string }>(
       `SELECT user_id FROM ding_user_snapshot
        WHERE fetch_status = 'success'

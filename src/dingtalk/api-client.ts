@@ -111,14 +111,13 @@ async function apiCall<T>(endpoint: string, options: ApiCallOptions = {}): Promi
 export async function listProcessTemplates(userId: string): Promise<ProcessTemplate[]> {
   const token = await tokenManager.getToken();
 
-  const url = 'https://api.dingtalk.com/v1.0/workflow/processes/templates';
+  const url = `https://api.dingtalk.com/v1.0/workflow/processes/managements/templates?userId=${encodeURIComponent(userId)}`;
   const response = await fetch(url, {
-    method: 'POST',
+    method: 'GET',
     headers: {
       'Content-Type': 'application/json',
       'x-acs-dingtalk-access-token': token,
     },
-    body: JSON.stringify({ userId }),
   });
 
   if (!response.ok) {
