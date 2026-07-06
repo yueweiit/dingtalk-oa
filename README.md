@@ -150,6 +150,47 @@ npm run sync:users
 
 > 注意：模板同步需要至少有一个已知用户（从审批实例或用户快照中获取）。用户同步需要 `qyapi_get_member` 权限已开通。部分外部用户或已离职用户可能查询失败，属正常情况。
 
+## 历史数据回填
+
+首次部署或需要补录历史审批数据时，使用 backfill 脚本。大时间范围会自动切分为 7 天子窗口逐个处理，避免触发钉钉 API 限制。
+
+```bash
+# 补最近一年（默认，7 天一切窗口，500ms 间隔）
+npx tsx scripts/backfill.ts --days=365
+
+# 补最近 30 天
+npx tsx scripts/backfill.ts --days=30
+
+# 补 7 天，加速模式（200ms 间隔）
+npx tsx scripts/backfill.ts --days=7 --delay-ms=200
+
+# 只补指定模板
+npx tsx scripts/backfill.ts --days=365 --process-code=PROC-XXX
+
+# 指定企业
+npx tsx scripts/backfill.ts --corp-id=ding144583309b2fb01c35c2f4657eb6378f
+
+# 查看帮助
+npx tsx scripts/backfill.ts --help
+```
+
+**参数说明：**
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--days=N` | 365 | 回溯天数 |
+| `--chunk-days=N` | 7 | 每个子窗口天数（越小越安全） |
+| `--delay-ms=N` | 500 | 每条实例处理间隔毫秒 |
+| `--process-code=XXX` | 全部 | 只补指定模板 |
+| `--corp-id=XXX` | 全部 | 只补指定企业 |
+
+**钉钉 API 限制：**
+- 搜索接口 40 QPS，脚本默认 2 QPS，留有充足余量
+- 每次搜索最多返回 20 条，自动翻页
+- 建议先用 `--days=7` 小范围测试，确认无误后再全量回填
+
+> 注意：回填会逐条调用钉钉 API 获取实例详情，一年数据量较大时运行时间较长。回填过程中可随时 Ctrl+C 中断，下次运行会跳过已有数据。
+
 ## 定时任务
 
 服务启动后自动运行以下定时任务（Asia/Shanghai 时区）：
@@ -211,6 +252,12 @@ npm run sync:users       # 只同步用户
 npx tsx scripts/sync-metadata.ts  # 全部同步
 npx tsx check-db.ts     # 查看数据库状态
 
+# 历史数据回填
+npm run backfill -- --days=365          # 补最近一年
+npm run backfill -- --days=7            # 补最近 7 天
+npm run backfill -- --days=30 --delay-ms=200  # 补 30 天加速模式
+npx tsx scripts/backfill.ts --help      # 查看全部参数
+
 # 测试
 npm run test:run     # 运行测试
 ```
@@ -222,7 +269,8 @@ dingtalk-oa/
 ├── migrations/              # 数据库迁移文件
 ├── scripts/
 │   ├── create-db.js         # 创建数据库
-│   └── sync-metadata.ts     # 手动同步脚本（模板+用户）
+│   ├── sync-metadata.ts     # 手动同步脚本（模板+用户）
+│   └── backfill.ts          # 历史数据回填 CLI
 ├── src/
 │   ├── index.ts             # 入口文件
 │   ├── app.ts               # Fastify 应用
