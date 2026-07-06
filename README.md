@@ -5,23 +5,29 @@
 ## 架构概览
 
 ```
-钉钉 Stream 回调 ──┐
-                   ├──→ Kafka ──→ Consumer ──→ 编排器 ──→ PostgreSQL
-钉钉 Webhook ─────┘                                  ↓
-                                              getInstance() API
-                                              getUser() API
+钉钉 Stream 回调 ──┐                   ┌→ 直接处理
+                   ├──→ Kafka ──→ Consumer ──┤
+钉钉 Webhook ─────┘        ↑               └→ DLQ（失败重试）
+                           │
+                    事件缓冲区（Kafka 不可用时本地缓存重试）
+                           │
+                     编排器 ──→ PostgreSQL
+                        ↓
+                   getInstance() API
+                   getUser() API
 ```
 
-**核心流程：** 钉钉推送审批事件 → Kafka 缓冲 → Consumer 消费 → 调用钉钉 API 获取完整数据 → 写入数据库
+**核心流程：** 钉钉推送审批事件 → Kafka 缓冲（失败时本地缓存） → Consumer 消费 → 调用钉钉 API 获取完整数据 → 事务写入数据库
 
 ## 技术栈
 
 - **运行时**: Node.js + TypeScript
 - **Web 框架**: Fastify 5
 - **数据库**: PostgreSQL (JSONB)
-- **消息队列**: Kafka（可选，支持内存队列降级）
+- **消息队列**: Kafka（可选，支持本地事件缓冲区降级）
 - **事件接收**: 钉钉 Stream 模式（为主）+ Webhook（备用）
-- **校验**: Zod（API 响应和配置校验）
+- **校验**: Zod（API 响应、配置、入参校验）
+- **限流**: 内置令牌桶限流器（30 req/s）
 
 ## 数据库表
 
@@ -119,19 +125,30 @@ npm start
 - 订阅 `/bpms/task_change` — 审批任务变更
 - 请求地址填写：`http://your-server:3000/webhook/approval`
 
+> 注意：Webhook 路由要求 `WEBHOOK_TOKEN` 和 `WEBHOOK_AES_KEY` 已配置，否则会拒绝请求（返回 503）。
+
 ## 手动同步脚本
 
 首次部署或数据不完整时，可手动运行同步脚本：
 
 ```bash
+# 全部同步（模板 + 用户）
 npx tsx scripts/sync-metadata.ts
+
+# 只同步模板
+npx tsx scripts/sync-metadata.ts --templates
+npm run sync:templates
+
+# 只同步用户
+npx tsx scripts/sync-metadata.ts --users
+npm run sync:users
 ```
 
 该脚本执行：
 - **同步模板名称** — 从钉钉 API 获取所有审批模板名称，补填本地数据库，同时插入新发现的模板
 - **同步用户信息** — 递归获取所有部门的用户，写入用户快照表，回填审批实例和任务表的姓名字段
 
-> 注意：用户同步需要 `qyapi_get_member` 权限已开通。部分外部用户或已离职用户可能查询失败，属正常情况。
+> 注意：模板同步需要至少有一个已知用户（从审批实例或用户快照中获取）。用户同步需要 `qyapi_get_member` 权限已开通。部分外部用户或已离职用户可能查询失败，属正常情况。
 
 ## 定时任务
 
@@ -189,8 +206,10 @@ npm run migrate:up   # 执行迁移
 npm run migrate:down # 回滚迁移
 
 # 数据同步与检查
-npx tsx scripts/sync-metadata.ts  # 手动同步模板和用户
-npx tsx check-db.ts  # 查看数据库状态
+npm run sync:templates   # 只同步模板
+npm run sync:users       # 只同步用户
+npx tsx scripts/sync-metadata.ts  # 全部同步
+npx tsx check-db.ts     # 查看数据库状态
 
 # 测试
 npm run test:run     # 运行测试
@@ -212,16 +231,20 @@ dingtalk-oa/
 │   │   └── schema.ts        # 配置 Zod 校验
 │   ├── db/
 │   │   ├── pool.ts          # PostgreSQL 连接池
+│   │   ├── json-types.ts    # JSON 类型定义（JsonValue）
 │   │   ├── types.ts         # 数据库表类型定义
 │   │   └── queries/         # 各表的 CRUD 操作
 │   ├── dingtalk/
-│   │   ├── api-client.ts    # 钉钉 API 封装
+│   │   ├── api-client.ts    # 钉钉 API 封装（含限流器）
 │   │   ├── token-manager.ts # Access Token 管理
+│   │   ├── signature.ts     # Webhook 签名验证与解密
 │   │   ├── stream-listener.ts # Stream 事件监听
 │   │   └── types.ts         # 钉钉 API 类型定义（Zod Schema）
 │   ├── kafka/
 │   │   ├── producer.ts      # Kafka 生产者
-│   │   └── consumer.ts      # Kafka 消费者
+│   │   ├── consumer.ts      # Kafka 消费者
+│   │   ├── event-buffer.ts  # 本地事件缓冲区（Kafka 降级）
+│   │   └── topics.ts        # Topic 定义
 │   ├── normalize/
 │   │   ├── orchestrator.ts  # 核心编排器（事件处理主流程）
 │   │   ├── instance-normalizer.ts  # 审批实例数据标准化
@@ -231,12 +254,14 @@ dingtalk-oa/
 │   ├── jobs/
 │   │   ├── scheduler.ts     # 定时任务调度
 │   │   ├── backfill.ts      # 历史数据回填
+│   │   ├── backfill-state.ts # 回填进度管理
 │   │   ├── process-template-sync.ts # 模板同步
 │   │   └── sync-template-names.ts   # 模板名称补填
 │   ├── webhook/
 │   │   └── index.ts         # Webhook 路由
 │   └── cli/                 # 命令行工具
 ├── check-db.ts              # 数据库状态检查工具
+├── test-api.ts              # API 测试工具
 ├── docker-compose.yml       # Kafka 容器配置
 ├── package.json
 └── tsconfig.json
@@ -290,7 +315,11 @@ npx tsx check-db.ts
 | raw_payload JSONB 存储 | 支持后续重处理 |
 | 用户快照 hash 去重 | 避免数据膨胀 |
 | Stream 为主 + Webhook 为备 | Stream 无需公网 IP |
-| Backfill 绕过 Kafka | 批量操作更高效 |
+| Webhook 未配置密钥时拒绝请求 | 防止未授权访问 |
+| 本地事件缓冲区 | Kafka 不可用时事件不丢失 |
+| API 令牌桶限流 | 主动防触发钉钉限流 |
+| 优雅关闭 + 30s 超时 | 确保资源释放，防止僵尸进程 |
+| 生产环境禁用 pino-pretty | 减少日志开销 |
 
 ## License
 
