@@ -80,6 +80,17 @@ export async function upsertSnapshot(params: {
   return client ? run(client) : withClient(run);
 }
 
+export async function findAnyUserId(): Promise<string | null> {
+  return withClient(async (client) => {
+    const { rows } = await client.query<{ user_id: string }>(
+      `SELECT user_id FROM ding_user_snapshot
+       WHERE fetch_status = 'success'
+       LIMIT 1`
+    );
+    return rows[0]?.user_id ?? null;
+  });
+}
+
 export async function recordFetchFailure(params: {
   corp_id: string;
   user_id: string;
