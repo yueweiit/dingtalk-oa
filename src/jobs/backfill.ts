@@ -15,18 +15,25 @@ import {
   getRunningCursor,
 } from './backfill-state.js';
 
-const DELAY_BETWEEN_REQUESTS_MS = 200;
-const MAX_INSTANCES_PER_WINDOW = 10000;
+// 钉钉 API 限制：40 QPS，留余量用保守值
+const DELAY_BETWEEN_INSTANCES_MS = 500;  // 每条实例间隔（getInstance）
+const DELAY_BETWEEN_PAGES_MS = 1000;     // 翻页间隔（searchInstances）
+const CHUNK_DAYS = 7;                     // 大窗口自动切分为 7 天小窗口
 
-export async function runBackfill(params: {
+export interface BackfillOptions {
   corp_id?: string;
   process_code?: string;
   window_start?: Date;
   window_end?: Date;
-}): Promise<void> {
-  const config = getConfig();
+  delayMs?: number;       // 自定义实例间延迟（ms）
+  chunkDays?: number;     // 自定义窗口切分天数
+}
 
-  // 如果未指定 corp_id，从数据库获取所有活跃的企业
+export async function runBackfill(params: BackfillOptions): Promise<void> {
+  const config = getConfig();
+  const instanceDelay = params.delayMs ?? DELAY_BETWEEN_INSTANCES_MS;
+  const chunkDays = params.chunkDays ?? CHUNK_DAYS;
+
   let corpIds: string[];
   if (params.corp_id) {
     corpIds = [params.corp_id];
@@ -40,8 +47,16 @@ export async function runBackfill(params: {
     return;
   }
 
+  const window_end = params.window_end || new Date();
+  const window_start = params.window_start || new Date(window_end.getTime() - config.BACKFILL_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  const totalDays = Math.ceil((window_end.getTime() - window_start.getTime()) / (24 * 60 * 60 * 1000));
+
+  // 大窗口自动切分
+  const chunks = splitWindow(window_start, window_end, chunkDays);
+
+  console.log(`[Backfill] 总时间范围: ${totalDays} 天，切分为 ${chunks.length} 个子窗口（每窗口 ${chunkDays} 天）`);
+
   for (const corp_id of corpIds) {
-    // 获取要处理的模板列表
     let templates;
     if (params.process_code) {
       templates = [{ corp_id, process_code: params.process_code, enabled: true, is_deleted: false }];
@@ -49,49 +64,74 @@ export async function runBackfill(params: {
       templates = await findEnabledTemplates(corp_id);
     }
 
-    console.log(`[Backfill] 开始补数据，共 ${templates.length} 个模板`);
+    console.log(`[Backfill] 企业 ${corp_id}: ${templates.length} 个模板，共 ${chunks.length * templates.length} 个任务`);
 
+    let templateIndex = 0;
     for (const template of templates) {
-      try {
-        await backfillTemplate({
-          corp_id,
-          process_code: template.process_code,
-          window_start: params.window_start,
-          window_end: params.window_end,
-        });
+      templateIndex++;
+      let totalProcessed = 0;
 
-        // 更新最后同步时间
-        await updateLastSyncAt(corp_id, template.process_code);
-      } catch (error) {
-        console.error(`[Backfill] 模板补数据失败: ${template.process_code}`, error);
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        const chunkLabel = `[${templateIndex}/${templates.length}] ${template.process_code} [${i + 1}/${chunks.length}]`;
+
+        try {
+          const processed = await backfillTemplate({
+            corp_id,
+            process_code: template.process_code,
+            window_start: chunk.start,
+            window_end: chunk.end,
+            delayMs: instanceDelay,
+            chunkLabel,
+          });
+          totalProcessed += processed;
+        } catch (error) {
+          console.error(`[Backfill] ${chunkLabel} 失败:`, error);
+        }
+
+        // 子窗口之间休息 2 秒，避免连续请求
+        if (i < chunks.length - 1) {
+          await delay(2000);
+        }
       }
-    }
 
-    console.log('[Backfill] 补数据完成');
+      await updateLastSyncAt(corp_id, template.process_code);
+      console.log(`[Backfill] 模板 ${template.process_code} 完成，共处理 ${totalProcessed} 条`);
+    }
   }
+}
+
+function splitWindow(start: Date, end: Date, chunkDays: number): { start: Date; end: Date }[] {
+  const chunks: { start: Date; end: Date }[] = [];
+  const chunkMs = chunkDays * 24 * 60 * 60 * 1000;
+  let current = start.getTime();
+  const endMs = end.getTime();
+
+  while (current < endMs) {
+    const chunkEnd = Math.min(current + chunkMs, endMs);
+    chunks.push({ start: new Date(current), end: new Date(chunkEnd) });
+    current = chunkEnd;
+  }
+
+  return chunks;
 }
 
 async function backfillTemplate(params: {
   corp_id: string;
   process_code: string;
-  window_start?: Date;
-  window_end?: Date;
-}): Promise<void> {
-  const config = getConfig();
-  const { corp_id, process_code } = params;
+  window_start: Date;
+  window_end: Date;
+  delayMs: number;
+  chunkLabel: string;
+}): Promise<number> {
+  const { corp_id, process_code, window_start, window_end, delayMs, chunkLabel } = params;
 
-  // 检查是否有正在运行的任务
   const runningCursor = await getRunningCursor(corp_id, process_code);
   if (runningCursor) {
-    console.warn(`[Backfill] 模板 ${process_code} 有正在运行的补数据任务，跳过`);
-    return;
+    console.warn(`[Backfill] ${chunkLabel} 有正在运行的任务，跳过`);
+    return 0;
   }
 
-  // 计算时间窗口
-  const window_end = params.window_end || new Date();
-  const window_start = params.window_start || new Date(window_end.getTime() - config.BACKFILL_WINDOW_DAYS * 24 * 60 * 60 * 1000);
-
-  // 创建游标
   const cursor = await createBackfillCursor({
     corp_id,
     process_code,
@@ -103,9 +143,9 @@ async function backfillTemplate(params: {
     let nextToken: string | undefined;
     let totalProcessed = 0;
     let pageCount = 0;
+    const startTime = Date.now();
 
     while (true) {
-      // 搜索审批实例
       const result = await searchInstances({
         processCode: process_code,
         startTime: window_start,
@@ -115,43 +155,32 @@ async function backfillTemplate(params: {
       });
 
       pageCount++;
-      console.log(`[Backfill] 模板 ${process_code}: 第 ${pageCount} 页，获取到 ${result.list.length} 条记录`);
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+      console.log(`[Backfill] ${chunkLabel} 第 ${pageCount} 页 | ${result.list.length} 条 | 已处理 ${totalProcessed} | ${elapsed}s`);
 
-      // 处理每条记录
       for (const instance of result.list) {
         try {
           await backfillInstance(corp_id, instance.processInstanceId, process_code);
           totalProcessed++;
-
-          // 防限流延迟
-          await delay(DELAY_BETWEEN_REQUESTS_MS);
+          await delay(delayMs);
         } catch (error) {
-          console.error(`[Backfill] 实例处理失败: ${instance.processInstanceId}`, error);
+          console.error(`[Backfill] 实例失败: ${instance.processInstanceId}`, error);
         }
       }
 
-      // 更新游标
       await updateBackfillCursor({
         id: cursor.id,
         cursor_offset: totalProcessed,
         processed_count: totalProcessed,
       });
 
-      // 检查是否还有更多数据
-      if (!result.nextToken || result.list.length === 0) {
-        break;
-      }
-
+      if (!result.nextToken || result.list.length === 0) break;
       nextToken = result.nextToken;
 
-      // 检查是否超出单窗口最大数量
-      if (totalProcessed >= MAX_INSTANCES_PER_WINDOW) {
-        console.warn(`[Backfill] 模板 ${process_code}: 达到单窗口最大数量 ${MAX_INSTANCES_PER_WINDOW}`);
-        break;
-      }
+      // 翻页间隔
+      await delay(DELAY_BETWEEN_PAGES_MS);
     }
 
-    // 标记完成
     await updateBackfillCursor({
       id: cursor.id,
       status: 'completed',
@@ -159,16 +188,16 @@ async function backfillTemplate(params: {
       processed_count: totalProcessed,
     });
 
-    console.log(`[Backfill] 模板 ${process_code} 补数据完成，共处理 ${totalProcessed} 条`);
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+    console.log(`[Backfill] ${chunkLabel} 完成 | ${totalProcessed} 条 | ${elapsed}s`);
+    return totalProcessed;
   } catch (error: any) {
-    // 标记失败
     await updateBackfillCursor({
       id: cursor.id,
       status: 'failed',
       finished_at: new Date(),
       error_message: error.message,
     });
-
     throw error;
   }
 }
