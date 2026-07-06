@@ -147,10 +147,8 @@ export async function searchInstances(params: {
     startTime: params.startTime.getTime(),
     endTime: params.endTime.getTime(),
     maxResults: params.size ?? 20,
+    nextToken: params.nextToken ?? '',
   };
-  if (params.nextToken) {
-    body.nextToken = params.nextToken;
-  }
 
   const data = await apiCall<unknown>('/workflow/processes/instanceIds/query', {
     method: 'POST',
