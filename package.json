@@ -1,0 +1,40 @@
+{
+  "name": "dingtalk-oa",
+  "version": "1.0.0",
+  "description": "钉钉审批数据归档系统",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "migrate": "node-pg-migrate",
+    "migrate:up": "node-pg-migrate up",
+    "migrate:down": "node-pg-migrate down",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "lint": "tsc --noEmit",
+    "fetch": "tsx src/cli/fetch-approval.ts"
+  },
+  "dependencies": {
+    "fastify": "^5.0.0",
+    "@fastify/cors": "^10.0.0",
+    "pg": "^8.13.0",
+    "kafkajs": "^2.2.4",
+    "dingtalk-stream": "^2.1.0",
+    "zod": "^3.23.0",
+    "node-cron": "^3.0.3",
+    "pino": "^9.0.0",
+    "pino-pretty": "^11.0.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "tsx": "^4.19.0",
+    "vitest": "^2.1.0",
+    "@types/pg": "^8.11.0",
+    "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.11",
+    "node-pg-migrate": "^7.0.0"
+  }
+}
