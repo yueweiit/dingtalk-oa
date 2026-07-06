@@ -141,7 +141,7 @@ export async function searchInstances(params: {
   endTime: Date;
   nextToken?: string | number;
   size?: number;
-}): Promise<{ list: ApprovalInstance[]; totalCount?: number; nextToken?: string | number }> {
+}): Promise<{ list: string[]; totalCount?: number; nextToken?: string | number }> {
   const body: Record<string, unknown> = {
     processCode: params.processCode,
     startTime: params.startTime.getTime(),
@@ -154,9 +154,6 @@ export async function searchInstances(params: {
     method: 'POST',
     body,
   });
-
-  // 调试：打印 API 响应结构
-  console.log('[ApiClient] searchInstances 响应:', JSON.stringify(data).slice(0, 500));
 
   const parsed = searchInstancesResponseSchema.parse(data);
   return parsed.result;

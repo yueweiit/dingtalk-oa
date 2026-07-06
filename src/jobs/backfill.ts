@@ -70,6 +70,7 @@ export async function runBackfill(params: BackfillOptions): Promise<void> {
     for (const template of templates) {
       templateIndex++;
       let totalProcessed = 0;
+      let consecutiveEmpty = 0;
 
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
@@ -85,18 +86,31 @@ export async function runBackfill(params: BackfillOptions): Promise<void> {
             chunkLabel,
           });
           totalProcessed += processed;
+
+          if (processed === 0) {
+            consecutiveEmpty++;
+            // 连续 3 个空窗口，跳过剩余窗口
+            if (consecutiveEmpty >= 3) {
+              const remaining = chunks.length - i - 1;
+              console.log(`[Backfill] ${chunkLabel} 连续 ${consecutiveEmpty} 个空窗口，跳过剩余 ${remaining} 个`);
+              break;
+            }
+          } else {
+            consecutiveEmpty = 0;
+          }
         } catch (error) {
           console.error(`[Backfill] ${chunkLabel} 失败:`, error);
         }
 
-        // 子窗口之间休息 2 秒，避免连续请求
         if (i < chunks.length - 1) {
           await delay(2000);
         }
       }
 
       await updateLastSyncAt(corp_id, template.process_code);
-      console.log(`[Backfill] 模板 ${template.process_code} 完成，共处理 ${totalProcessed} 条`);
+      if (totalProcessed > 0) {
+        console.log(`[Backfill] 模板 ${template.process_code} 完成，共处理 ${totalProcessed} 条`);
+      }
     }
   }
 }
@@ -158,13 +172,13 @@ async function backfillTemplate(params: {
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
       console.log(`[Backfill] ${chunkLabel} 第 ${pageCount} 页 | ${result.list.length} 条 | 已处理 ${totalProcessed} | ${elapsed}s`);
 
-      for (const instance of result.list) {
+      for (const processInstanceId of result.list) {
         try {
-          await backfillInstance(corp_id, instance.processInstanceId, process_code);
+          await backfillInstance(corp_id, processInstanceId, process_code);
           totalProcessed++;
           await delay(delayMs);
         } catch (error) {
-          console.error(`[Backfill] 实例失败: ${instance.processInstanceId}`, error);
+          console.error(`[Backfill] 实例失败: ${processInstanceId}`, error);
         }
       }
 
