@@ -164,6 +164,12 @@ npx tsx scripts/backfill.ts --days=30
 # 补 7 天，加速模式（200ms 间隔）
 npx tsx scripts/backfill.ts --days=7 --delay-ms=200
 
+# 指定时间范围
+npx tsx scripts/backfill.ts --start=2026-01-01 --end=2026-06-30
+
+# 指定模板 + 时间范围
+npx tsx scripts/backfill.ts --start=2026-01-01 --process-code=PROC-XXX
+
 # 只补指定模板
 npx tsx scripts/backfill.ts --days=365 --process-code=PROC-XXX
 
@@ -178,11 +184,15 @@ npx tsx scripts/backfill.ts --help
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--days=N` | 365 | 回溯天数 |
+| `--days=N` | 365 | 回溯天数（与 `--start`/`--end` 互斥） |
+| `--start=YYYY-MM-DD` | - | 开始日期（与 `--days` 互斥） |
+| `--end=YYYY-MM-DD` | 今天 | 结束日期（需配合 `--start` 使用） |
 | `--chunk-days=N` | 7 | 每个子窗口天数（越小越安全） |
 | `--delay-ms=N` | 500 | 每条实例处理间隔毫秒 |
 | `--process-code=XXX` | 全部 | 只补指定模板 |
 | `--corp-id=XXX` | 全部 | 只补指定企业 |
+
+> `--days` 和 `--start` 不能同时使用。`--end` 不指定时默认为今天。
 
 **钉钉 API 限制：**
 - 搜索接口 40 QPS，脚本默认 2 QPS，留有充足余量

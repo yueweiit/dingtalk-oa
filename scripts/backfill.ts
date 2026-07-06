@@ -15,7 +15,9 @@ async function main() {
 用法: npx tsx scripts/backfill.ts [选项]
 
 选项:
-  --days=N            回溯天数（默认 365）
+  --days=N            回溯天数（默认 365，与 --start/--end 互斥）
+  --start=YYYY-MM-DD  开始日期（与 --days 互斥）
+  --end=YYYY-MM-DD    结束日期（默认今天，需配合 --start 使用）
   --chunk-days=N      每个子窗口天数（默认 7，越小越安全）
   --delay-ms=N        每条实例间隔毫秒（默认 500，越小越快）
   --process-code=XXX  只补指定模板（默认全部）
@@ -32,28 +34,55 @@ async function main() {
   npx tsx scripts/backfill.ts --days=30 --chunk-days=3     # 补30天，3天一切
   npx tsx scripts/backfill.ts --days=7 --delay-ms=200      # 补7天，加速模式
   npx tsx scripts/backfill.ts --process-code=PROC-XXX      # 只补指定模板
+  npx tsx scripts/backfill.ts --start=2026-01-01 --end=2026-06-30  # 指定时间范围
+  npx tsx scripts/backfill.ts --start=2026-01-01 --process-code=PROC-XXX  # 指定模板+时间范围
 `);
     process.exit(0);
   }
 
-  const days = parseInt(parseArg(args, 'days') || '365', 10);
+  const daysArg = parseArg(args, 'days');
+  const startArg = parseArg(args, 'start');
+  const endArg = parseArg(args, 'end');
   const chunkDays = parseInt(parseArg(args, 'chunk-days') || '7', 10);
   const delayMs = parseInt(parseArg(args, 'delay-ms') || '500', 10);
   const processCode = parseArg(args, 'process-code');
   const corpId = parseArg(args, 'corp-id');
 
+  if (daysArg && startArg) {
+    console.error('错误: --days 和 --start 不能同时使用');
+    process.exit(1);
+  }
+
   const config = getConfig();
   const targetCorpId = corpId || config.DINGTALK_CORP_ID;
 
-  const window_end = new Date();
-  const window_start = new Date(window_end.getTime() - days * 24 * 60 * 60 * 1000);
-  const totalChunks = Math.ceil(days / chunkDays);
+  let window_start: Date;
+  let window_end: Date;
+
+  if (startArg) {
+    window_start = new Date(startArg);
+    if (isNaN(window_start.getTime())) {
+      console.error('错误: --start 日期格式无效，请使用 YYYY-MM-DD');
+      process.exit(1);
+    }
+    window_end = endArg ? new Date(endArg) : new Date();
+    if (isNaN(window_end.getTime())) {
+      console.error('错误: --end 日期格式无效，请使用 YYYY-MM-DD');
+      process.exit(1);
+    }
+  } else {
+    const days = parseInt(daysArg || '365', 10);
+    window_end = new Date();
+    window_start = new Date(window_end.getTime() - days * 24 * 60 * 60 * 1000);
+  }
+  const totalDays = Math.ceil((window_end.getTime() - window_start.getTime()) / (24 * 60 * 60 * 1000));
+  const totalChunks = Math.ceil(totalDays / chunkDays);
 
   console.log('========== 补数据任务 ==========');
   console.log(`企业 ID: ${targetCorpId || '(全部)'}`);
   console.log(`模板: ${processCode || '(全部)'}`);
   console.log(`时间范围: ${window_start.toISOString().slice(0, 10)} ~ ${window_end.toISOString().slice(0, 10)}`);
-  console.log(`回溯天数: ${days}`);
+  console.log(`回溯天数: ${totalDays}`);
   console.log(`子窗口: ${chunkDays} 天/个，共 ${totalChunks} 个`);
   console.log(`实例延迟: ${delayMs}ms`);
   console.log('================================\n');
