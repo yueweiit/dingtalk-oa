@@ -166,6 +166,11 @@ async function syncUsers(corpId: string) {
 
 // ========== 主流程 ==========
 async function main() {
+  const args = process.argv.slice(2);
+  const onlyTemplates = args.includes('--templates');
+  const onlyUsers = args.includes('--users');
+  const runAll = !onlyTemplates && !onlyUsers;
+
   const config = getConfig();
   const corpId = config.DINGTALK_CORP_ID;
 
@@ -176,8 +181,12 @@ async function main() {
 
   console.log(`企业 ID: ${corpId}`);
 
-  try { await syncTemplateNames(corpId); } catch (e: any) { console.error('模板同步失败:', e.message); }
-  try { await syncUsers(corpId); } catch (e: any) { console.error('用户同步失败:', e.message); }
+  if (runAll || onlyTemplates) {
+    try { await syncTemplateNames(corpId); } catch (e: any) { console.error('模板同步失败:', e.message); }
+  }
+  if (runAll || onlyUsers) {
+    try { await syncUsers(corpId); } catch (e: any) { console.error('用户同步失败:', e.message); }
+  }
 
   await closePool();
   console.log('\n全部完成');

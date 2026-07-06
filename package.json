@@ -14,7 +14,9 @@
     "test": "vitest",
     "test:run": "vitest run",
     "lint": "tsc --noEmit",
-    "fetch": "tsx src/cli/fetch-approval.ts"
+    "fetch": "tsx src/cli/fetch-approval.ts",
+    "sync:templates": "tsx scripts/sync-metadata.ts --templates",
+    "sync:users": "tsx scripts/sync-metadata.ts --users"
   },
   "dependencies": {
     "fastify": "^5.0.0",
