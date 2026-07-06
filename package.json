@@ -16,7 +16,8 @@
     "lint": "tsc --noEmit",
     "fetch": "tsx src/cli/fetch-approval.ts",
     "sync:templates": "tsx scripts/sync-metadata.ts --templates",
-    "sync:users": "tsx scripts/sync-metadata.ts --users"
+    "sync:users": "tsx scripts/sync-metadata.ts --users",
+    "backfill": "tsx scripts/backfill.ts"
   },
   "dependencies": {
     "fastify": "^5.0.0",
