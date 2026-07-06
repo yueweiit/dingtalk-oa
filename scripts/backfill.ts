@@ -3,8 +3,9 @@ import { closePool } from '../src/db/pool.js';
 import { runBackfill } from '../src/jobs/backfill.js';
 
 function parseArg(args: string[], name: string): string | undefined {
-  const arg = args.find(a => a.startsWith(`${name}=`));
-  return arg ? arg.split('=')[1] : undefined;
+  const prefix = `--${name}=`;
+  const arg = args.find(a => a.startsWith(prefix));
+  return arg ? arg.slice(prefix.length) : undefined;
 }
 
 async function main() {
