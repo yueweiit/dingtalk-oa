@@ -9,8 +9,11 @@ export async function createCursor(params: {
 }): Promise<BackfillCursor> {
   return withClient(async (client) => {
     const { rows } = await client.query<BackfillCursor>(
-      `INSERT INTO backfill_cursor (corp_id, process_code, window_start, window_end)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO backfill_cursor (corp_id, process_code, window_start, window_end, status)
+       VALUES ($1, $2, $3, $4, 'running')
+       ON CONFLICT (corp_id, process_code, window_start, window_end)
+       DO UPDATE SET status = 'running', error_message = NULL, finished_at = NULL,
+                     cursor_offset = 0, processed_count = 0, created_at = now()
        RETURNING *`,
       [params.corp_id, params.process_code, params.window_start, params.window_end]
     );
