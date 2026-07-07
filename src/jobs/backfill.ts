@@ -70,7 +70,6 @@ export async function runBackfill(params: BackfillOptions): Promise<void> {
     for (const template of templates) {
       templateIndex++;
       let totalProcessed = 0;
-      let consecutiveEmpty = 0;
 
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
@@ -86,18 +85,6 @@ export async function runBackfill(params: BackfillOptions): Promise<void> {
             chunkLabel,
           });
           totalProcessed += processed;
-
-          if (processed === 0) {
-            consecutiveEmpty++;
-            // 连续 3 个空窗口，跳过剩余窗口
-            if (consecutiveEmpty >= 3) {
-              const remaining = chunks.length - i - 1;
-              console.log(`[Backfill] ${chunkLabel} 连续 ${consecutiveEmpty} 个空窗口，跳过剩余 ${remaining} 个`);
-              break;
-            }
-          } else {
-            consecutiveEmpty = 0;
-          }
         } catch (error) {
           console.error(`[Backfill] ${chunkLabel} 失败:`, error);
         }
