@@ -1,8 +1,9 @@
 import { getConfig } from '../src/config/index.js';
-import { getPool, closePool } from '../src/db/pool.js';
+import { getPool, closePool, withTransaction } from '../src/db/pool.js';
 import { listProcessTemplates, getUser, listDepartments, listUsers } from '../src/dingtalk/api-client.js';
 import { computeUserHash } from '../src/normalize/user-snapshot.js';
 import { findAnyOriginatorUserId } from '../src/db/queries/approval-instance.js';
+import { syncDepartmentTree } from '../src/organization/department-tree-sync.js';
 
 getConfig();
 const pool = getPool();
@@ -55,26 +56,44 @@ async function syncTemplateNames(corpId: string) {
 }
 
 // ========== 用户信息同步 ==========
+type DiscoveredDepartment = { dept_id: number; name: string; parentDeptId: number };
+
 async function syncUsers(corpId: string) {
   console.log('\n===== 同步用户信息 =====');
 
   // 1. 递归获取所有部门
   console.log('  获取部门列表...');
-  const allDepts: { dept_id: number; name: string }[] = [];
+  const allDepts: DiscoveredDepartment[] = [];
   const queue = [1]; // 从根部门开始
+  let departmentDiscoveryComplete = true;
   while (queue.length > 0) {
     const deptId = queue.shift()!;
     try {
       const subDepts = await listDepartments(deptId);
       for (const dept of subDepts) {
-        allDepts.push(dept);
+        allDepts.push({ ...dept, parentDeptId: deptId });
         queue.push(dept.dept_id);
       }
     } catch (e: any) {
+      departmentDiscoveryComplete = false;
       console.log(`  ⚠️  获取部门 ${deptId} 子部门失败: ${e.message}`);
     }
   }
   console.log(`  共找到 ${allDepts.length} 个部门`);
+  if (departmentDiscoveryComplete) {
+    const count = await withTransaction((client) => syncDepartmentTree(
+      client,
+      corpId,
+      allDepts.map((department) => ({
+        deptId: String(department.dept_id),
+        parentDeptId: String(department.parentDeptId),
+        name: department.name,
+      }))
+    ));
+    console.log(`部门树同步完成，写入 ${count} 个节点`);
+  } else {
+    console.warn('部门发现不完整，已跳过部门树更新，避免误停用已有部门。');
+  }
 
   // 2. 获取所有部门下的用户
   const allUsers = new Map<string, any>();
