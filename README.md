@@ -76,6 +76,8 @@ PGDATABASE=dingtalk_oa
 DINGTALK_APP_KEY=your_app_key
 DINGTALK_APP_SECRET=your_app_secret
 DINGTALK_CORP_ID=your_corp_id
+# 用于读取审批模板列表，必须拥有模板管理权限
+DINGTALK_TEMPLATE_ADMIN_USER_ID=17600775501628783
 
 # Kafka（可选，不配置时事件直接处理）
 KAFKA_BROKERS=localhost:9092
@@ -337,6 +339,7 @@ dingtalk-oa/
 | DINGTALK_APP_KEY | 是 | - | 钉钉应用 AppKey |
 | DINGTALK_APP_SECRET | 是 | - | 钉钉应用 AppSecret |
 | DINGTALK_CORP_ID | 否 | - | 企业 ID（首次收到事件时自动获取） |
+| DINGTALK_TEMPLATE_ADMIN_USER_ID | 模板同步时是 | - | 固定模板管理用户 ID；未配置时跳过模板同步且不标记模板删除 |
 | KAFKA_BROKERS | 否 | - | Kafka 地址（逗号分隔） |
 | KAFKA_CLIENT_ID | 否 | dingtalk-oa | Kafka 客户端 ID |
 | KAFKA_GROUP_ID | 否 | dingtalk-oa-group | Kafka 消费组 ID |

@@ -1,6 +1,7 @@
 import { listProcessTemplates } from '../dingtalk/api-client.js';
 import { getAllCorpIds } from '../db/queries/corp-config.js';
-import { findAnyOriginatorUserId } from '../db/queries/approval-instance.js';
+import { getConfig } from '../config/index.js';
+import { getTemplateAdminUserId } from '../dingtalk/template-admin-user.js';
 import {
   findAllTemplates,
   upsertProcessTemplate,
@@ -38,9 +39,9 @@ async function syncCorpTemplates(corp_id: string): Promise<void> {
 
   try {
     // 1. 获取钉钉当前所有模板
-    const userId = await findAnyOriginatorUserId();
+    const userId = getTemplateAdminUserId(getConfig());
     if (!userId) {
-      console.warn(`[ProcessTemplateSync] 没有可用的 userId，跳过同步: ${corp_id}`);
+      console.warn(`[ProcessTemplateSync] 未配置 DINGTALK_TEMPLATE_ADMIN_USER_ID，跳过同步: ${corp_id}`);
       return;
     }
     const remoteTemplates = await listProcessTemplates(userId);
@@ -88,6 +89,11 @@ async function syncCorpTemplates(corp_id: string): Promise<void> {
     }
 
     // 4. 标记已删除的模板
+    if (remoteTemplates.length === 0) {
+      console.warn(`[ProcessTemplateSync] 模板列表为空，保留现有模板状态: ${corp_id}`);
+      return;
+    }
+
     const remoteProcessCodes = new Set(remoteTemplates.map((t) => t.processCode));
     for (const local of localTemplates) {
       if (!remoteProcessCodes.has(local.process_code) && !local.is_deleted) {
