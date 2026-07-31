@@ -1,7 +1,7 @@
 import { listProcessTemplates } from '../dingtalk/api-client.js';
 import { findAllTemplates, updateTemplateName } from '../db/queries/process-template.js';
-import { findAnyOriginatorUserId } from '../db/queries/approval-instance.js';
 import { getConfig } from '../config/index.js';
+import { getTemplateAdminUserId } from '../dingtalk/template-admin-user.js';
 
 /**
  * 同步钉钉模板名称到本地数据库
@@ -17,9 +17,9 @@ export async function syncTemplateNames(): Promise<void> {
     }
 
     // 从钉钉 API 获取所有模板
-    const userId = await findAnyOriginatorUserId();
+    const userId = getTemplateAdminUserId(config);
     if (!userId) {
-      console.warn('[SyncTemplateNames] 没有可用的 userId，跳过同步');
+      console.warn('[SyncTemplateNames] 未配置 DINGTALK_TEMPLATE_ADMIN_USER_ID，跳过同步');
       return;
     }
     const remoteTemplates = await listProcessTemplates(userId);

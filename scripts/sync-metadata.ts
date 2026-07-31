@@ -2,8 +2,8 @@ import { getConfig } from '../src/config/index.js';
 import { getPool, closePool, withTransaction } from '../src/db/pool.js';
 import { listProcessTemplates, getUser, listDepartments, listUsers } from '../src/dingtalk/api-client.js';
 import { computeUserHash } from '../src/normalize/user-snapshot.js';
-import { findAnyOriginatorUserId } from '../src/db/queries/approval-instance.js';
 import { syncDepartmentTree } from '../src/organization/department-tree-sync.js';
+import { getTemplateAdminUserId } from '../src/dingtalk/template-admin-user.js';
 
 getConfig();
 const pool = getPool();
@@ -11,9 +11,9 @@ const pool = getPool();
 // ========== 模板名称同步 ==========
 async function syncTemplateNames(corpId: string) {
   console.log('\n===== 同步模板名称 =====');
-  const userId = await findAnyOriginatorUserId();
+  const userId = getTemplateAdminUserId(getConfig());
   if (!userId) {
-    console.log('没有可用的 userId，跳过模板同步');
+    console.log('未配置 DINGTALK_TEMPLATE_ADMIN_USER_ID，跳过模板同步');
     return;
   }
   const remote = await listProcessTemplates(userId);

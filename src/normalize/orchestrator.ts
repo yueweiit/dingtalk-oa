@@ -1,10 +1,12 @@
 import { getInstance, listProcessTemplates } from '../dingtalk/api-client.js';
 import type { ApprovalInstanceDetail } from '../dingtalk/types.js';
-import { upsertInstance, findAnyOriginatorUserId } from '../db/queries/approval-instance.js';
+import { upsertInstance } from '../db/queries/approval-instance.js';
 import { upsertTask } from '../db/queries/approval-task.js';
 import { upsertProcessTemplate, findByCorpAndProcessCode, updateTemplateName } from '../db/queries/process-template.js';
 import { insertEvent, updateEventStatus } from '../db/queries/event-log.js';
 import { saveCorpId } from '../db/queries/corp-config.js';
+import { getConfig } from '../config/index.js';
+import { getTemplateAdminUserId } from '../dingtalk/template-admin-user.js';
 import { withTransaction } from '../db/pool.js';
 import { normalizeInstance } from './instance-normalizer.js';
 import { normalizeTasks } from './task-normalizer.js';
@@ -70,7 +72,7 @@ export async function processApprovalMessage(params: ProcessMessageParams): Prom
         // 尝试从模板列表 API 获取名称
         let templateName: string | null = null;
         try {
-          const userId = await findAnyOriginatorUserId();
+          const userId = getTemplateAdminUserId(getConfig());
           if (userId) {
             const templates = await listProcessTemplates(userId);
             const matched = templates.find(t => t.processCode === params.processCode);

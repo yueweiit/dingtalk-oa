@@ -12,6 +12,7 @@ export const configSchema = z.object({
   DINGTALK_APP_KEY: z.string(),
   DINGTALK_APP_SECRET: z.string(),
   DINGTALK_CORP_ID: z.string().optional(),
+  DINGTALK_TEMPLATE_ADMIN_USER_ID: z.string().trim().min(1).optional(),
 
   // Kafka（可选）
   KAFKA_BROKERS: z.string().optional(),
