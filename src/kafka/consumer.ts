@@ -33,15 +33,16 @@ export async function initKafkaConsumer(handler: (message: any) => Promise<void>
     heartbeatInterval: 3000,
   });
 
-  await consumer.connect();
-  await consumer.subscribe({
-    topic: TOPICS.APPROVAL_EVENTS_RAW,
-    fromBeginning: false,
-  });
+  try {
+    await consumer.connect();
+    await consumer.subscribe({
+      topic: TOPICS.APPROVAL_EVENTS_RAW,
+      fromBeginning: false,
+    });
 
-  await consumer.run({
-    autoCommit: false,
-    eachMessage: async ({ topic, partition, message, heartbeat }) => {
+    await consumer.run({
+      autoCommit: false,
+      eachMessage: async ({ topic, partition, message, heartbeat }) => {
       if (!message.value) {
         console.warn('[KafkaConsumer] 收到空消息（tombstone），跳过');
         await consumer!.commitOffsets([{ topic, partition, offset: (BigInt(message.offset) + 1n).toString() }]);
@@ -96,8 +97,18 @@ export async function initKafkaConsumer(handler: (message: any) => Promise<void>
 
       // 无论成功还是失败（已发 DLQ），都 commit offset
       await consumer!.commitOffsets([{ topic, partition, offset: nextOffset }]);
-    },
-  });
+      },
+    });
+  } catch (error) {
+    // 启动阶段 Kafka 不可用时释放半连接状态，让主服务和 outbox 继续启动。
+    try {
+      await consumer.disconnect();
+    } catch {
+      // Ignore cleanup errors while Kafka is unavailable.
+    }
+    consumer = null;
+    throw error;
+  }
 
   console.log('[KafkaConsumer] Kafka Consumer 启动成功');
 }

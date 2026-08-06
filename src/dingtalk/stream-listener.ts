@@ -1,10 +1,33 @@
 import { DWClient, type DWClientDownStream, EventAck } from 'dingtalk-stream';
 import { getConfig } from '../config/index.js';
-import { kafkaProducer } from '../kafka/producer.js';
-import { bufferEvent } from '../kafka/event-buffer.js';
+import { enqueueApprovalEvent } from '../kafka/event-outbox.js';
 import { streamEventSchema } from './types.js';
 
 let client: any = null;
+
+function createEventMessage(params: {
+  eventType: string;
+  corpId: string;
+  processInstanceId: string;
+  processCode?: string;
+  eventId: string;
+  payload: Record<string, unknown>;
+}): {
+  eventType: string;
+  corpId: string;
+  processInstanceId: string;
+  processCode?: string;
+  eventId: string;
+  payload: Record<string, unknown>;
+  source: string;
+  receivedAt: string;
+} {
+  return {
+    ...params,
+    source: 'stream',
+    receivedAt: new Date().toISOString(),
+  };
+}
 
 export async function startStreamListener(): Promise<void> {
   const config = getConfig();
@@ -15,84 +38,55 @@ export async function startStreamListener(): Promise<void> {
     debug: true,
   });
 
-  // 订阅审批实例变更事件
   client.registerCallbackListener('/bpms/instance_change', async (event: any) => {
     try {
-      const data = JSON.parse(event.data);
-      const parsed = streamEventSchema.parse(data);
-
-      // 生成事件 ID（钉钉可能不提供 EventId，用 composite key 兜底）
+      const parsed = streamEventSchema.parse(JSON.parse(event.data));
+      if (!parsed.ProcessInstanceId) throw new Error('instance_change event has no processInstanceId');
       const eventId = parsed.EventId
         || `${parsed.CorpId}:${parsed.ProcessInstanceId}:${parsed.EventType}:${parsed.TimeStamp || ''}`;
 
-      console.log('[StreamListener] 收到审批实例变更事件:', {
+      await enqueueApprovalEvent(createEventMessage({
+        eventType: 'bpms_instance_change',
         corpId: parsed.CorpId,
         processInstanceId: parsed.ProcessInstanceId,
-        type: parsed.Type,
-      });
-
-      await kafkaProducer.send({
-        key: `${parsed.CorpId}:${parsed.ProcessInstanceId}`,
-        value: {
-          eventType: 'bpms_instance_change',
-          corpId: parsed.CorpId,
-          processInstanceId: parsed.ProcessInstanceId,
-          processCode: parsed.ProcessCode,
-          eventId,
-          payload: parsed,
-          source: 'stream',
-          receivedAt: new Date().toISOString(),
-        },
-      });
+        processCode: parsed.ProcessCode,
+        eventId,
+        payload: parsed,
+      }));
     } catch (error) {
-      console.error('[StreamListener] 处理审批实例变更事件失败:', error);
+      console.error('[StreamListener] instance_change event persistence failed:', error);
     }
   });
 
-  // 订阅审批任务变更事件
   client.registerCallbackListener('/bpms/task_change', async (event: any) => {
     try {
-      const data = JSON.parse(event.data);
-      const parsed = streamEventSchema.parse(data);
-
+      const parsed = streamEventSchema.parse(JSON.parse(event.data));
+      if (!parsed.ProcessInstanceId) throw new Error('task_change event has no processInstanceId');
       const eventId = parsed.EventId
         || `${parsed.CorpId}:${parsed.ProcessInstanceId}:${parsed.EventType}:${parsed.TimeStamp || ''}`;
 
-      console.log('[StreamListener] 收到审批任务变更事件:', {
+      await enqueueApprovalEvent(createEventMessage({
+        eventType: 'bpms_task_change',
         corpId: parsed.CorpId,
         processInstanceId: parsed.ProcessInstanceId,
-      });
-
-      await kafkaProducer.send({
-        key: `${parsed.CorpId}:${parsed.ProcessInstanceId}`,
-        value: {
-          eventType: 'bpms_task_change',
-          corpId: parsed.CorpId,
-          processInstanceId: parsed.ProcessInstanceId,
-          processCode: parsed.ProcessCode,
-          eventId,
-          payload: parsed,
-          source: 'stream',
-          receivedAt: new Date().toISOString(),
-        },
-      });
+        processCode: parsed.ProcessCode,
+        eventId,
+        payload: parsed,
+      }));
     } catch (error) {
-      console.error('[StreamListener] 处理审批任务变更事件失败:', error);
+      console.error('[StreamListener] task_change event persistence failed:', error);
     }
   });
 
-  // 兜底：捕获所有 EVENT 类型消息（审批事件走 EVENT 而非 CALLBACK）
-  // 注意：dingtalk-stream 库不 await 回调返回值，因此无法在此异步等待 Kafka 发送
-  // 依赖每日 backfill 作为安全网兜底丢失的事件
+  // Catch event messages as a fallback for event types delivered outside callbacks.
   client.registerAllEventListener((message: DWClientDownStream) => {
     const eventType = message.headers?.eventType;
     const eventCorpId = message.headers?.eventCorpId;
     const messageId = message.headers?.messageId;
 
-    // 审批事件：从 headers 取 corpId，从 data 取 processInstanceId
-    if (eventType && (eventType.includes('bpms') || eventType.includes('process'))) {
+    if (eventType && eventCorpId && (eventType.includes('bpms') || eventType.includes('process'))) {
       try {
-        const data = JSON.parse(message.data);
+        const data = JSON.parse(message.data) as Record<string, any>;
         const processInstanceId = data.processInstanceId || data.ProcessInstanceId;
         const processCode = data.processCode || data.ProcessCode;
         const actionType = data.type || data.Type;
@@ -100,53 +94,49 @@ export async function startStreamListener(): Promise<void> {
           || messageId
           || `${eventCorpId}:${processInstanceId}:${eventType}:${data.TimeStamp || ''}`;
 
-        if (processInstanceId && eventCorpId) {
-          console.log('[StreamListener] 审批事件:', { eventCorpId, processInstanceId, eventType, actionType });
+        if (processInstanceId) {
+          console.log('[StreamListener] approval event:', {
+            eventCorpId,
+            processInstanceId,
+            eventType,
+            actionType,
+          });
 
-          const eventPayload = {
+          void enqueueApprovalEvent(createEventMessage({
             eventType,
             corpId: eventCorpId,
             processInstanceId,
             processCode,
             eventId,
             payload: data,
-            source: 'stream',
-            receivedAt: new Date().toISOString(),
-          };
-
-          kafkaProducer.send({
-            key: `${eventCorpId}:${processInstanceId}`,
-            value: eventPayload,
-          }).catch((err: any) => {
-            console.warn('[StreamListener] Kafka 发送失败，事件已缓冲:', err.message);
-            bufferEvent(`${eventCorpId}:${processInstanceId}`, eventPayload);
+          })).catch((error: any) => {
+            console.error('[StreamListener] fallback event persistence failed:', error?.message || error);
           });
         }
       } catch {
-        // 非 JSON，忽略
+        // Ignore non-JSON stream messages.
       }
     }
 
     return { status: EventAck.SUCCESS };
   });
 
-  // 连接断线重连
   client.on('disconnect', () => {
-    console.warn('[StreamListener] 连接断开，尝试重连...');
+    console.warn('[StreamListener] connection disconnected; reconnecting');
   });
 
   client.on('reconnect', () => {
-    console.log('[StreamListener] 重连成功');
+    console.log('[StreamListener] reconnected');
   });
 
   await client.connect();
-  console.log('[StreamListener] Stream 连接成功');
+  console.log('[StreamListener] Stream connected');
 }
 
 export async function stopStreamListener(): Promise<void> {
   if (client) {
     await client.disconnect();
     client = null;
-    console.log('[StreamListener] Stream 连接已关闭');
+    console.log('[StreamListener] Stream connection closed');
   }
 }

@@ -2,8 +2,11 @@ services:
   kafka:
     image: apache/kafka:latest
     container_name: dingtalk-oa-kafka
+    restart: unless-stopped
     ports:
       - "9092:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
     environment:
       KAFKA_NODE_ID: "1"
       KAFKA_PROCESS_ROLES: "broker,controller"
@@ -17,3 +20,6 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
       CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+
+volumes:
+  kafka_data:

@@ -4,7 +4,7 @@ import { ensureCorpConfigTable } from './db/queries/corp-config.js';
 import { createApp } from './app.js';
 import { initKafkaProducer, closeKafkaProducer } from './kafka/producer.js';
 import { initKafkaConsumer, closeKafkaConsumer } from './kafka/consumer.js';
-import { startEventBuffer, stopEventBuffer } from './kafka/event-buffer.js';
+import { startEventOutbox, stopEventOutbox } from './kafka/event-outbox.js';
 import { startStreamListener, stopStreamListener } from './dingtalk/stream-listener.js';
 import { startScheduler, stopScheduler } from './jobs/scheduler.js';
 import { processApprovalMessage } from './normalize/orchestrator.js';
@@ -26,12 +26,16 @@ async function main() {
   await ensureCorpConfigTable();
   console.log('✅ 企业配置表初始化成功');
 
-  // 3. 初始化 Kafka Producer
-  await initKafkaProducer();
-  console.log('✅ Kafka Producer 初始化成功');
+  // 3. 初始化 Kafka Producer。Kafka 暂时不可用时不阻断主服务，事件由 outbox 持久化。
+  try {
+    await initKafkaProducer();
+    console.log('✅ Kafka Producer 初始化成功');
+  } catch (error) {
+    console.warn('⚠️ Kafka Producer 初始化失败，服务继续启动，待 Kafka 恢复后重启应用投递 outbox:', error);
+  }
 
   // 3.5 启动事件缓冲区
-  startEventBuffer();
+  startEventOutbox();
 
   // 4. 启动 Fastify 服务（健康检查立即可用）
   const app = await createApp();
@@ -51,11 +55,15 @@ async function main() {
     console.warn('⚠️ 模板名称同步失败，但不阻断启动:', error);
   });
 
-  // 6. 启动 Kafka Consumer
-  await initKafkaConsumer(async (message) => {
-    await processApprovalMessage(message);
-  });
-  console.log('✅ Kafka Consumer 启动成功');
+  // 6. 启动 Kafka Consumer。启动时 Kafka 不可用时保留 API/Stream/outbox 能力。
+  try {
+    await initKafkaConsumer(async (message) => {
+      await processApprovalMessage(message);
+    });
+    console.log('✅ Kafka Consumer 启动成功');
+  } catch (error) {
+    console.warn('⚠️ Kafka Consumer 启动失败，服务继续启动；Kafka 恢复后请重启应用:', error);
+  }
 
   // 7. 启动 Stream Listener
   try {
@@ -86,7 +94,7 @@ async function main() {
       stopScheduler();
       console.log('✅ 定时任务已停止');
 
-      stopEventBuffer();
+      stopEventOutbox();
 
       await stopStreamListener();
       console.log('✅ Stream Listener 已停止');

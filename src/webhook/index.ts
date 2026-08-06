@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { getConfig } from '../config/index.js';
 import { verifySignature } from '../dingtalk/signature.js';
-import { kafkaProducer } from '../kafka/producer.js';
+import { enqueueApprovalEvent } from '../kafka/event-outbox.js';
 import { streamEventSchema } from '../dingtalk/types.js';
 
 export async function webhookRoutes(fastify: FastifyInstance): Promise<void> {
@@ -38,6 +38,9 @@ export async function webhookRoutes(fastify: FastifyInstance): Promise<void> {
         return reply.status(400).send({ success: false, message: '事件数据格式无效' });
       }
       const parsed = parseResult.data;
+      if (!parsed.ProcessInstanceId) {
+        return reply.status(400).send({ success: false, message: '缺少审批实例ID' });
+      }
 
       console.log('[Webhook] 收到审批事件:', {
         corpId: parsed.CorpId,
@@ -48,18 +51,15 @@ export async function webhookRoutes(fastify: FastifyInstance): Promise<void> {
       const eventId = parsed.EventId
         || `${parsed.CorpId}:${parsed.ProcessInstanceId}:${parsed.EventType}:${parsed.TimeStamp || ''}`;
 
-      await kafkaProducer.send({
-        key: `${parsed.CorpId}:${parsed.ProcessInstanceId}`,
-        value: {
-          eventType: 'bpms_instance_change',
-          corpId: parsed.CorpId,
-          processInstanceId: parsed.ProcessInstanceId,
-          processCode: parsed.ProcessCode,
-          eventId,
-          payload: parsed,
-          source: 'webhook',
-          receivedAt: new Date().toISOString(),
-        },
+      await enqueueApprovalEvent({
+        eventType: 'bpms_instance_change',
+        corpId: parsed.CorpId,
+        processInstanceId: parsed.ProcessInstanceId,
+        processCode: parsed.ProcessCode,
+        eventId,
+        payload: parsed,
+        source: 'webhook',
+        receivedAt: new Date().toISOString(),
       });
 
       return reply.send({ success: true });
