@@ -28,7 +28,13 @@ export async function initKafkaProducer(): Promise<void> {
     transactionalId: undefined,
   });
 
-  await producer.connect();
+  try {
+    await producer.connect();
+  } catch (error) {
+    // Kafka 暂时不可用时不要保留半连接状态；事件会先写入 outbox，服务可继续启动。
+    producer = null;
+    throw error;
+  }
   console.log('[KafkaProducer] Kafka Producer 连接成功');
 }
 

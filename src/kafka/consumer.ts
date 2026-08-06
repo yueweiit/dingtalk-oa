@@ -121,15 +121,16 @@ async function startKafkaConsumer(): Promise<void> {
     scheduleRecovery(error);
   });
 
-  await currentConsumer.connect();
-  await currentConsumer.subscribe({
-    topic: TOPICS.APPROVAL_EVENTS_RAW,
-    fromBeginning: false,
-  });
+  try {
+    await currentConsumer.connect();
+    await currentConsumer.subscribe({
+      topic: TOPICS.APPROVAL_EVENTS_RAW,
+      fromBeginning: false,
+    });
 
-  await currentConsumer.run({
-    autoCommit: false,
-    eachMessage: async ({ topic, partition, message }) => {
+    await currentConsumer.run({
+      autoCommit: false,
+      eachMessage: async ({ topic, partition, message }) => {
       if (!message.value) {
         console.warn('[KafkaConsumer] 收到空消息（tombstone），跳过');
         await currentConsumer.commitOffsets([
@@ -182,8 +183,20 @@ async function startKafkaConsumer(): Promise<void> {
       }
 
       await currentConsumer.commitOffsets([{ topic, partition, offset: nextOffset }]);
-    },
-  });
+      },
+    });
+  } catch (error) {
+    // 启动阶段 Kafka 不可用时释放半连接状态，让主服务和 outbox 继续启动。
+    try {
+      await currentConsumer.disconnect();
+    } catch {
+      // Ignore cleanup errors while Kafka is unavailable.
+    }
+    if (consumer === currentConsumer) {
+      consumer = null;
+    }
+    throw error;
+  }
 
   if (consumer !== currentConsumer || isClosing) return;
   health.lastStartedAt = new Date().toISOString();
