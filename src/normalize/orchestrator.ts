@@ -25,6 +25,69 @@ export interface ProcessMessageParams {
   receivedAt: string;
 }
 
+export interface RefreshApprovalInstanceParams {
+  corpId: string;
+  processInstanceId: string;
+  processCode?: string;
+  originatorUserId?: string;
+}
+
+/**
+ * 从钉钉读取实例详情并按既有归档口径写入，供事件与状态核对共用。
+ */
+export async function refreshApprovalInstance(
+  params: RefreshApprovalInstanceParams
+): Promise<ApprovalInstanceDetail> {
+  let instanceDetail: ApprovalInstanceDetail;
+  try {
+    instanceDetail = await getInstance(params.processInstanceId);
+  } catch (apiError: any) {
+    const errorDetail = apiError.name === 'ZodError'
+      ? JSON.stringify(apiError.errors, null, 2)
+      : apiError.message;
+    throw new Error(`getInstance 失败: ${errorDetail}`);
+  }
+
+  await withTransaction(async (client) => {
+    const normalizedInstance = normalizeInstance(params.corpId, instanceDetail, {
+      processInstanceId: params.processInstanceId,
+      processCode: params.processCode,
+      originatorUserId: params.originatorUserId,
+    });
+    await upsertInstance(normalizedInstance, client);
+
+    if (instanceDetail.tasks && instanceDetail.tasks.length > 0) {
+      const normalizedTasks = normalizeTasks(
+        params.corpId,
+        params.processInstanceId,
+        instanceDetail.tasks
+      );
+
+      for (const task of normalizedTasks) {
+        await upsertTask(task, client);
+      }
+    }
+
+    if (instanceDetail.formComponentValues) {
+      await saveFormFields(
+        params.corpId,
+        instanceDetail.processCode || params.processCode || '',
+        instanceDetail.formComponentValues,
+        client
+      );
+    }
+  });
+
+  const originatorId = instanceDetail.originatorId || params.originatorUserId;
+  if (originatorId) {
+    processUserSnapshot(params.corpId, originatorId).catch((error) => {
+      console.error('[Orchestrator] 用户快照处理失败:', error);
+    });
+  }
+
+  return instanceDetail;
+}
+
 /**
  * 处理审批事件消息
  * 统一入口：消息 → 拉取完整实例 → normalize → 单事务写入
@@ -101,62 +164,12 @@ export async function processApprovalMessage(params: ProcessMessageParams): Prom
       }
     }
 
-    // 获取完整实例详情
-    let instanceDetail: ApprovalInstanceDetail;
-    try {
-      instanceDetail = await getInstance(params.processInstanceId);
-    } catch (apiError: any) {
-      // API 调用或 Zod 验证失败时，记录详细错误
-      const errorDetail = apiError.name === 'ZodError'
-        ? JSON.stringify(apiError.errors, null, 2)
-        : apiError.message;
-      throw new Error(`getInstance 失败: ${errorDetail}`);
-    }
-
-    // 使用事务写入所有数据
-    await withTransaction(async (client) => {
-      // 1. 写入审批实例
-      const normalizedInstance = normalizeInstance(params.corpId, instanceDetail, {
-        processInstanceId: params.processInstanceId,
-        processCode: params.processCode,
-        originatorUserId: (params.payload?.staffId || params.payload?.StaffId) as string | undefined,
-      });
-      await upsertInstance(normalizedInstance, client);
-
-      // 2. 写入审批任务
-      if (instanceDetail.tasks && instanceDetail.tasks.length > 0) {
-        const normalizedTasks = normalizeTasks(
-          params.corpId,
-          params.processInstanceId,
-          instanceDetail.tasks
-        );
-
-        for (const task of normalizedTasks) {
-          await upsertTask(task, client);
-        }
-      }
-
-      // 3. 保存表单字段元数据
-      if (instanceDetail.formComponentValues) {
-        await saveFormFields(
-          params.corpId,
-          instanceDetail.processCode || params.processCode || '',
-          instanceDetail.formComponentValues,
-          client
-        );
-      }
+    await refreshApprovalInstance({
+      corpId: params.corpId,
+      processInstanceId: params.processInstanceId,
+      processCode: params.processCode,
+      originatorUserId: (params.payload?.staffId || params.payload?.StaffId) as string | undefined,
     });
-
-    // 4. 处理用户快照（不阻断主流程）
-    // 优先用 API 返回的 originatorId，兜底用事件中的 staffId
-    const originatorId = instanceDetail.originatorId
-      || (params.payload?.staffId as string | undefined)
-      || (params.payload?.StaffId as string | undefined);
-    if (originatorId) {
-      processUserSnapshot(params.corpId, originatorId).catch((error) => {
-        console.error('[Orchestrator] 用户快照处理失败:', error);
-      });
-    }
 
     // 更新事件日志为成功
     await updateEventStatus({

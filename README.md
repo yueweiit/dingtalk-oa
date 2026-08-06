@@ -212,6 +212,7 @@ npx tsx scripts/backfill.ts --help
 | 每天 02:00 | 补数据 | 扫描最近 N 天的审批数据，兜底 Stream 漏掉的事件 |
 | 每天 03:00 | 日志清理 | 清理 90 天前的成功事件日志 |
 | 每天 04:00 | 模板同步 | 从钉钉同步审批模板列表 |
+| 每 15 分钟 | 审批中状态核对 | 限量核对仍为 `RUNNING`（审批中）的实例，兜底 Kafka / Stream 漏掉的状态变更 |
 
 ## API 接口
 
@@ -345,6 +346,9 @@ dingtalk-oa/
 | KAFKA_GROUP_ID | 否 | dingtalk-oa-group | Kafka 消费组 ID |
 | BACKFILL_LOOKBACK_DAYS | 否 | 1 | 每日补数据回溯天数 |
 | BACKFILL_WINDOW_DAYS | 否 | 30 | 单次补数据窗口天数 |
+| APPROVAL_STATUS_RECONCILE_CRON | 否 | */15 * * * * | 审批中状态核对 cron 表达式（默认每 15 分钟） |
+| APPROVAL_STATUS_RECONCILE_BATCH_SIZE | 否 | 100 | 单次最多核对的审批中实例数量，范围 1-500 |
+| APPROVAL_STATUS_RECONCILE_DELAY_MS | 否 | 500 | 状态核对中每次钉钉 API 请求之间的间隔（毫秒） |
 | LOG_LEVEL | 否 | info | 日志级别 |
 | PORT | 否 | 3000 | 服务端口 |
 
@@ -366,6 +370,12 @@ npx tsx scripts/sync-metadata.ts
 ```bash
 npx tsx check-db.ts
 ```
+
+**Kafka 消费者离线：**
+
+- `GET /health/ready`（就绪检查）会在 Kafka 消费者未加入消费组时返回 `503`，响应中的 `kafkaConsumer`（Kafka 消费者）字段会给出状态、最近崩溃时间和重连次数。
+- 消费者崩溃或初始连接失败后会自动重建，重连等待按 `1 秒、2 秒、4 秒...` 递增，最长 60 秒。
+- Kafka 事件未能送达时，定时状态核对只扫描本地仍为 `RUNNING`（审批中）的实例，并沿用正常入库逻辑更新状态。
 
 ## 设计决策
 

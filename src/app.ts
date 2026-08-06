@@ -4,6 +4,7 @@ import { getConfig } from './config/index.js';
 import { webhookRoutes } from './webhook/index.js';
 import { getPool } from './db/pool.js';
 import { tokenManager } from './dingtalk/token-manager.js';
+import { getKafkaConsumerHealth, isKafkaConsumerHealthy } from './kafka/consumer.js';
 
 export async function createApp() {
   const config = getConfig();
@@ -44,6 +45,7 @@ export async function createApp() {
     const checks = {
       database: false,
       token: false,
+      kafkaConsumer: false,
     };
 
     // 检查数据库连接
@@ -65,11 +67,14 @@ export async function createApp() {
       fastify.log.error({ err: error }, 'Token 健康检查失败');
     }
 
-    const isReady = checks.database && checks.token;
+    checks.kafkaConsumer = isKafkaConsumerHealthy();
+
+    const isReady = checks.database && checks.token && checks.kafkaConsumer;
 
     return reply.status(isReady ? 200 : 503).send({
       status: isReady ? 'ready' : 'not_ready',
       checks,
+      kafkaConsumer: getKafkaConsumerHealth(),
     });
   });
 
@@ -80,6 +85,7 @@ export async function createApp() {
       uptime: process.uptime(),
       memory: process.memoryUsage(),
       timestamp: new Date().toISOString(),
+      kafkaConsumer: getKafkaConsumerHealth(),
     };
 
     return reply.send(metrics);

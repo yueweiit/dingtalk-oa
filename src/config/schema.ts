@@ -26,6 +26,9 @@ export const configSchema = z.object({
   // Backfill
   BACKFILL_LOOKBACK_DAYS: z.coerce.number().default(1),
   BACKFILL_WINDOW_DAYS: z.coerce.number().default(30),
+  APPROVAL_STATUS_RECONCILE_CRON: z.string().default('*/15 * * * *'),
+  APPROVAL_STATUS_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(100),
+  APPROVAL_STATUS_RECONCILE_DELAY_MS: z.coerce.number().int().min(0).max(10_000).default(500),
 
   // 日志
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),

@@ -3,6 +3,7 @@ import { getConfig } from '../config/index.js';
 import { runBackfill } from './backfill.js';
 import { syncProcessTemplates } from './process-template-sync.js';
 import { cleanupOldEvents } from '../db/queries/event-log.js';
+import { reconcileRunningApprovalStatuses } from './approval-status-reconcile.js';
 
 let scheduledTasks: cron.ScheduledTask[] = [];
 
@@ -62,12 +63,27 @@ export function startScheduler(): void {
     timezone: 'Asia/Shanghai',
   });
 
-  scheduledTasks.push(backfillTask, cleanupTask, templateSyncTask);
+  // 定期核对审批中实例，兜底 Kafka 或 Stream 漏掉的状态变更事件。
+  const statusReconcileTask = cron.schedule(config.APPROVAL_STATUS_RECONCILE_CRON, async () => {
+    try {
+      await reconcileRunningApprovalStatuses({
+        limit: config.APPROVAL_STATUS_RECONCILE_BATCH_SIZE,
+        delayMs: config.APPROVAL_STATUS_RECONCILE_DELAY_MS,
+      });
+    } catch (error) {
+      console.error('[Scheduler] 审批状态核对任务失败:', error);
+    }
+  }, {
+    timezone: 'Asia/Shanghai',
+  });
+
+  scheduledTasks.push(backfillTask, cleanupTask, templateSyncTask, statusReconcileTask);
 
   console.log('[Scheduler] 定时任务已注册:');
   console.log('  - 每天 02:00: 补数据任务');
   console.log('  - 每天 03:00: 事件日志清理');
   console.log('  - 每天 04:00: 审批模板同步');
+  console.log(`  - ${config.APPROVAL_STATUS_RECONCILE_CRON}: 审批中状态核对（每次最多 ${config.APPROVAL_STATUS_RECONCILE_BATCH_SIZE} 条）`);
 }
 
 export function stopScheduler(): void {

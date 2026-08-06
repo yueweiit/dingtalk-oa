@@ -110,6 +110,23 @@ export async function findByProcessCode(
   });
 }
 
+/**
+ * 返回最久未同步的审批中实例，供定时状态核对兜底使用。
+ * 成功刷新后 upsert 会推进 updated_at，因此下一轮会自然处理下一批。
+ */
+export async function findRunningApprovalInstances(limit: number): Promise<DingApprovalInstance[]> {
+  return withClient(async (client) => {
+    const { rows } = await client.query<DingApprovalInstance>(
+      `SELECT * FROM ding_approval_instance
+       WHERE deleted_at IS NULL AND UPPER(COALESCE(status, '')) = 'RUNNING'
+       ORDER BY updated_at ASC
+       LIMIT $1`,
+      [limit]
+    );
+    return rows;
+  });
+}
+
 export async function markAsDeleted(corp_id: string, process_instance_id: string): Promise<void> {
   await withClient(async (client) => {
     await client.query(
