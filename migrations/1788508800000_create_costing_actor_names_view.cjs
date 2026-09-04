@@ -45,10 +45,10 @@ exports.up = (pgm) => {
         JOIN costing_read.allowed_process_template w USING (process_code)
        WHERE NULLIF(BTRIM(a.comment_user_id), '') IS NOT NULL
     ), ranked_names AS (
-      SELECT refs.corp_id,
-             refs.user_id,
-             u.name,
-             u.title,
+      SELECT refs.corp_id::text AS corp_id,
+             refs.user_id::text AS user_id,
+             u.name::text AS name,
+             u.title::text AS title,
              u.valid_from,
              u.valid_to,
              u.is_current,

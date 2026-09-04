@@ -27,4 +27,13 @@ describe('costing approval actor names view migration', () => {
     expect(source).not.toContain('GRANT SELECT ON public.ding_user_snapshot');
     expect(source).toContain('DROP VIEW IF EXISTS costing_read.approval_actor_names_v1');
   });
+
+  it('preserves the existing public column types during an in-place view upgrade', () => {
+    const source = readFileSync(migrationPath, 'utf8');
+
+    expect(source).toContain('refs.corp_id::text AS corp_id');
+    expect(source).toContain('refs.user_id::text AS user_id');
+    expect(source).toContain('u.name::text AS name');
+    expect(source).toContain('u.title::text AS title');
+  });
 });
