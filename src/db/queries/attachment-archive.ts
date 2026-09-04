@@ -83,6 +83,7 @@ function toPendingArchive(row: Record<string, unknown>): PendingArchive {
     objectKey: String(row.object_key),
     attempts: Number(row.attempts),
     thumbnailMediaId: String(row.thumbnail_media_id || ''),
+    recoveryCanary: Boolean(row.recovery_canary),
   };
 }
 

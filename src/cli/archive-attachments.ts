@@ -97,7 +97,9 @@ async function run(): Promise<void> {
         processedCount += 1;
       } catch (error) {
         failedCount += 1;
-        await markAttachmentFailed(record.id, record.attempts, error);
+        // A recovery canary has already exhausted every configured strategy once;
+        // do not let the normal timer repeat the same quota-consuming chain.
+        await markAttachmentFailed(record.id, record.recoveryCanary ? 5 : record.attempts, error);
         console.error(`[Archive] ${record.processInstanceId}/${record.fileId} 归档失败:`, error);
       }
       if (index + 1 < pending.length) await delay(config.ARCHIVE_DELAY_MS);

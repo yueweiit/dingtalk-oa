@@ -19,6 +19,7 @@ export interface PendingArchive {
   objectKey: string;
   attempts: number;
   thumbnailMediaId?: string;
+  recoveryCanary?: boolean;
 }
 
 interface ObjectHeadMissing {
