@@ -30,6 +30,16 @@ export const configSchema = z.object({
   APPROVAL_STATUS_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(100),
   APPROVAL_STATUS_RECONCILE_DELAY_MS: z.coerce.number().int().min(0).max(10_000).default(500),
 
+  // 成本系统附件归档（MinIO 只使用专用非 root 账号）
+  ARCHIVE_MINIO_ENDPOINT: z.string().default('172.19.49.226'),
+  ARCHIVE_MINIO_PORT: z.coerce.number().int().min(1).max(65535).default(9000),
+  ARCHIVE_MINIO_USE_SSL: z.string().default('false').transform((value) => ['1', 'true', 'yes', 'on'].includes(value.toLowerCase())),
+  ARCHIVE_MINIO_ACCESS_KEY: z.string().optional(),
+  ARCHIVE_MINIO_SECRET_KEY: z.string().optional(),
+  ARCHIVE_MINIO_BUCKET: z.string().default('dingtalk-approval-archive'),
+  ARCHIVE_BATCH_SIZE: z.coerce.number().int().min(1).max(10).default(10),
+  ARCHIVE_DELAY_MS: z.coerce.number().int().min(1000).max(60_000).default(1000),
+
   // 日志
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 

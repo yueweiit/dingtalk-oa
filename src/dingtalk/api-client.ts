@@ -1,4 +1,5 @@
 import { tokenManager } from './token-manager.js';
+import { recordApiUsage } from '../db/queries/attachment-archive.js';
 import {
   listProcessTemplatesResponseSchema,
   searchInstancesResponseSchema,
@@ -59,6 +60,7 @@ async function apiCall<T>(endpoint: string, options: ApiCallOptions = {}): Promi
   for (let attempt = 0; attempt <= retries; attempt++) {
     await rateLimiter.acquire();
     const token = await tokenManager.getToken();
+    let usageRecorded = false;
 
     try {
       const response = await fetch(`${BASE_URL}${endpoint}`, {
@@ -69,6 +71,10 @@ async function apiCall<T>(endpoint: string, options: ApiCallOptions = {}): Promi
         },
         body: body ? JSON.stringify(body) : undefined,
       });
+      await recordApiUsage(endpoint, response.ok).catch((error) => {
+        console.warn('[ApiClient] API 调用计数写入失败:', error);
+      });
+      usageRecorded = true;
 
       if (response.status === 401 && attempt < retries) {
         tokenManager.clearToken();
@@ -96,6 +102,11 @@ async function apiCall<T>(endpoint: string, options: ApiCallOptions = {}): Promi
 
       return (await response.json()) as T;
     } catch (error) {
+      if (!usageRecorded) {
+        await recordApiUsage(endpoint, false).catch((recordError) => {
+          console.warn('[ApiClient] API 调用计数写入失败:', recordError);
+        });
+      }
       if (attempt < retries) {
         console.warn(`[ApiClient] API 调用失败，重试 ${attempt + 1}/${retries}:`, error);
         await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
@@ -164,6 +175,22 @@ export async function getInstance(processInstanceId: string): Promise<ApprovalIn
 
   const parsed = getInstanceResponseSchema.parse(data);
   return parsed.result;
+}
+
+export async function getApprovalAttachmentDownloadUrl(
+  processInstanceId: string,
+  fileId: string,
+): Promise<string> {
+  const data = await apiCall<Record<string, unknown>>('/workflow/processInstances/spaces/files/urls/download', {
+    method: 'POST',
+    body: { processInstanceId, fileId },
+  });
+  const result = (data.result && typeof data.result === 'object' ? data.result : data) as Record<string, unknown>;
+  const uri = String(
+    result.downloadUri ?? result.downloadUrl ?? result.download_uri ?? result.download_url ?? '',
+  ).trim();
+  if (!uri) throw new Error('钉钉附件下载地址响应中没有 downloadUri');
+  return uri;
 }
 
 export async function getUser(userId: string): Promise<UserInfo> {
