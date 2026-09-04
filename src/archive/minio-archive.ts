@@ -21,7 +21,15 @@ export function getArchiveMinioClient(): Minio.Client {
 
 export async function headArchivedObject(objectKey: string): Promise<
   | { exists: false }
-  | { exists: true; size: number; etag: string; contentType: string; sha256: string }
+  | {
+    exists: true;
+    size: number;
+    etag: string;
+    contentType: string;
+    sha256: string;
+    archiveMethod?: import('./download-strategies.js').ArchiveMethod;
+    contentQuality?: import('./download-strategies.js').ContentQuality;
+  }
 > {
   const config = getConfig();
   try {
@@ -33,6 +41,12 @@ export async function headArchivedObject(objectKey: string): Promise<
       etag: stat.etag,
       contentType: String(metadata['content-type'] || metadata['Content-Type'] || 'application/octet-stream'),
       sha256: String(metadata['x-amz-meta-sha256'] || metadata.sha256 || ''),
+      archiveMethod: String(
+        metadata['x-amz-meta-archive-method'] || metadata['archive-method'] || '',
+      ) as import('./download-strategies.js').ArchiveMethod || undefined,
+      contentQuality: String(
+        metadata['x-amz-meta-content-quality'] || metadata['content-quality'] || '',
+      ) as import('./download-strategies.js').ContentQuality || undefined,
     };
   } catch (error) {
     const code = (error as { code?: string }).code;

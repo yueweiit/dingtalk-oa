@@ -18,7 +18,9 @@
     "sync:templates": "tsx scripts/sync-metadata.ts --templates",
     "sync:users": "tsx scripts/sync-metadata.ts --users",
     "backfill": "tsx scripts/backfill.ts",
-    "archive:attachments": "tsx src/cli/archive-attachments.ts"
+    "archive:attachments": "tsx src/cli/archive-attachments.ts",
+    "archive:recovery-canaries": "tsx src/cli/prepare-archive-recovery.ts canaries",
+    "archive:recovery-remainders": "tsx src/cli/prepare-archive-recovery.ts successful-remainders"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",

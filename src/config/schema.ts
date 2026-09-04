@@ -13,6 +13,8 @@ export const configSchema = z.object({
   DINGTALK_APP_SECRET: z.string(),
   DINGTALK_CORP_ID: z.string().optional(),
   DINGTALK_TEMPLATE_ADMIN_USER_ID: z.string().trim().min(1).optional(),
+  DINGTALK_ARCHIVE_DOWNLOAD_USER_ID: z.string().trim().min(1).optional(),
+  DINGTALK_ARCHIVE_DOWNLOAD_UNION_ID: z.string().trim().min(1).optional(),
 
   // Kafka（可选）
   KAFKA_BROKERS: z.string().optional(),
@@ -39,6 +41,7 @@ export const configSchema = z.object({
   ARCHIVE_MINIO_BUCKET: z.string().default('dingtalk-approval-archive'),
   ARCHIVE_BATCH_SIZE: z.coerce.number().int().min(1).max(10).default(10),
   ARCHIVE_DELAY_MS: z.coerce.number().int().min(1000).max(60_000).default(1000),
+  ARCHIVE_RECOVERY_CANARY_ONLY: z.string().default('false').transform((value) => ['1', 'true', 'yes', 'on'].includes(value.toLowerCase())),
 
   // 日志
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),

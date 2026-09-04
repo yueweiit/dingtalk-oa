@@ -13,6 +13,12 @@ describe('approval attachment extraction', () => {
             name: '附件',
             value: JSON.stringify([
               { fileId: 'FORM/1', spaceId: 'SPACE-1', fileName: '../packing.xlsx', fileSize: 12 },
+              {
+                fileId: 'IMAGE-1',
+                spaceId: 'SPACE-1',
+                fileName: '装箱计划.png',
+                thumbnail: { authMediaId: 'THUMB-1' },
+              },
             ]),
           },
         ],
@@ -31,9 +37,10 @@ describe('approval attachment extraction', () => {
       },
     });
 
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(3);
     expect(rows[0]).toMatchObject({ fileId: 'FORM/1', origin: 'form', declaredSize: 12 });
-    expect(rows[1]).toMatchObject({
+    expect(rows[1]).toMatchObject({ fileId: 'IMAGE-1', thumbnailMediaId: 'THUMB-1' });
+    expect(rows[2]).toMatchObject({
       fileId: 'COMMENT-1',
       origin: 'comment',
       commentUserId: 'USER-1',
@@ -47,5 +54,17 @@ describe('approval attachment extraction', () => {
     expect(buildObjectKey('corp', 'proc', '../../evil/name.pdf')).toBe(
       'corp/proc/..%2F..%2Fevil%2Fname.pdf',
     );
+  });
+
+  it('keeps thumbnail media as parent metadata instead of creating a fake attachment', () => {
+    const rows = extractAttachmentCandidates({
+      corpId: 'corp', processInstanceId: 'proc', processCode: 'code',
+      rawPayload: {
+        formComponentValues: [{ value: JSON.stringify([{ fileId: 'FILE', fileName: 'photo.png', thumbnail: { mediaId: 'THUMB' } }]) }],
+      },
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ fileId: 'FILE', thumbnailMediaId: 'THUMB' });
   });
 });

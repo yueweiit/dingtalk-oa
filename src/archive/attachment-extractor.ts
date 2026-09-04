@@ -10,6 +10,7 @@ export interface AttachmentCandidate {
   fileName: string;
   declaredSize: number | null;
   objectKey: string;
+  thumbnailMediaId?: string;
   commentUserId?: string;
   commentUserName?: string;
   commentTime?: string;
@@ -56,7 +57,9 @@ function findFiles(value: unknown, found: Record<string, unknown>[] = []): Recor
 
   const record = parsed as Record<string, unknown>;
   if (firstValue(record, FILE_ID_KEYS) !== undefined) found.push(record);
-  for (const nested of Object.values(record)) {
+  for (const [key, nested] of Object.entries(record)) {
+    // thumbnail.mediaId is a preview reference of the parent file, not another attachment.
+    if (key === 'thumbnail') continue;
     if (nested && (typeof nested === 'object' || typeof nested === 'string')) findFiles(nested, found);
   }
   return found;
@@ -84,6 +87,12 @@ function toCandidate(
 ): AttachmentCandidate | null {
   const fileId = stringValue(firstValue(file, FILE_ID_KEYS));
   if (!fileId) return null;
+  const thumbnail = file.thumbnail && typeof file.thumbnail === 'object'
+    ? file.thumbnail as Record<string, unknown>
+    : {};
+  const thumbnailMediaId = stringValue(
+    thumbnail.authMediaId ?? thumbnail.mediaId ?? file.authMediaId ?? file.auth_media_id,
+  );
   return {
     corpId: params.corpId,
     processInstanceId: params.processInstanceId,
@@ -94,6 +103,7 @@ function toCandidate(
     fileName: stringValue(firstValue(file, FILE_NAME_KEYS)) || fileId,
     declaredSize: sizeValue(firstValue(file, FILE_SIZE_KEYS)),
     objectKey: buildObjectKey(params.corpId, params.processInstanceId, fileId),
+    ...(thumbnailMediaId ? { thumbnailMediaId } : {}),
     ...(comment
       ? {
           commentUserId: stringValue(comment.userId ?? comment.user_id ?? comment.operatorUserId),

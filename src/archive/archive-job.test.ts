@@ -27,8 +27,10 @@ describe('attachment archive job', () => {
         etag: 'etag-existing',
         contentType: 'application/vnd.ms-excel',
         sha256: 'existing-sha',
+        archiveMethod: 'legacy_file_url',
+        contentQuality: 'original',
       }),
-      getDownloadUri,
+      getDownload: getDownloadUri,
       fetchContent: vi.fn(),
       putObject: vi.fn(),
       markArchived,
@@ -38,7 +40,13 @@ describe('attachment archive job', () => {
     expect(getDownloadUri).not.toHaveBeenCalled();
     expect(markArchived).toHaveBeenCalledWith(
       record.id,
-      expect.objectContaining({ etag: 'etag-existing', sha256: 'existing-sha', actualSize: 4 }),
+      expect.objectContaining({
+        etag: 'etag-existing',
+        sha256: 'existing-sha',
+        actualSize: 4,
+        archiveMethod: 'legacy_file_url',
+        contentQuality: 'original',
+      }),
     );
   });
 
@@ -49,23 +57,35 @@ describe('attachment archive job', () => {
 
     await archiveAttachment(record, {
       headObject: async () => ({ exists: false }),
-      getDownloadUri: async () => 'https://download.example/file',
+      getDownload: async () => ({
+        uri: 'https://download.example/file',
+        headers: {},
+        archiveMethod: 'workflow_download',
+        contentQuality: 'original',
+        diagnostics: [{ strategy: 'workflow_download', ok: true, attemptedAt: '2026-09-04T08:00:00.000Z' }],
+      }),
       fetchContent: async () => ({ body: Buffer.from('data'), contentType: 'application/octet-stream' }),
       putObject,
       markArchived,
       recordApiCall,
     });
 
-    expect(recordApiCall).toHaveBeenCalledWith('approval_attachment_download_url', true);
+    expect(recordApiCall).toHaveBeenCalledWith('attachment_content:workflow_download', true);
     expect(putObject).toHaveBeenCalledWith(
       record.objectKey,
       Buffer.from('data'),
-      expect.objectContaining({ 'x-amz-meta-original-filename': 'packing.xlsx' }),
+      expect.objectContaining({
+        'x-amz-meta-original-filename': 'packing.xlsx',
+        'x-amz-meta-archive-method': 'workflow_download',
+        'x-amz-meta-content-quality': 'original',
+      }),
     );
     expect(markArchived).toHaveBeenCalledWith(
       record.id,
       expect.objectContaining({
         actualSize: 4,
+        archiveMethod: 'workflow_download',
+        contentQuality: 'original',
         sha256: '3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7',
       }),
     );
@@ -76,7 +96,13 @@ describe('attachment archive job', () => {
 
     await archiveAttachment({ ...record, fileName: '国际物流装箱单.xlsx' }, {
       headObject: async () => ({ exists: false }),
-      getDownloadUri: async () => 'https://download.example/file',
+      getDownload: async () => ({
+        uri: 'https://download.example/file',
+        headers: {},
+        archiveMethod: 'workflow_download',
+        contentQuality: 'original',
+        diagnostics: [],
+      }),
       fetchContent: async () => ({ body: Buffer.from('data'), contentType: 'application/octet-stream' }),
       putObject,
       markArchived: vi.fn(),
@@ -95,10 +121,74 @@ describe('attachment archive job', () => {
     expect(failureState(5)).toBe('manual_required');
   });
 
-  it('sends permanent DingTalk permission and historical-user errors straight to manual review', () => {
+  it('does not treat userNotExist as proof that the file is permanently unavailable', () => {
     expect(failureState(1, new Error('{"code":"userNotExist","message":"用户不存在"}')))
-      .toBe('manual_required');
+      .toBe('retry');
     expect(failureState(1, new Error('{"code":"noPermission","message":"无访问权限"}')))
       .toBe('manual_required');
+    const exhausted = new Error('未返回下载地址');
+    Object.assign(exhausted, {
+      diagnostics: [
+        { strategy: 'workflow_download', ok: false, errorCode: 'invalidFileId' },
+        { strategy: 'thumbnail_media', ok: false, message: '未返回下载地址' },
+      ],
+    });
+    expect(failureState(1, exhausted)).toBe('manual_required');
+  });
+
+  it('forwards signed headers and accepts preview-quality thumbnail size differences', async () => {
+    const fetchContent = vi.fn(async () => ({
+      body: Buffer.from('preview'),
+      contentType: 'image/png',
+    }));
+    const markArchived = vi.fn();
+
+    await archiveAttachment(record, {
+      headObject: async () => ({ exists: false }),
+      getDownload: async () => ({
+        uri: 'https://download.example/thumbnail',
+        headers: { Authorization: 'signed' },
+        archiveMethod: 'thumbnail_media',
+        contentQuality: 'preview',
+        diagnostics: [
+          { strategy: 'workflow_download', ok: false, errorCode: 'userNotExist', attemptedAt: '2026-09-04T08:00:00.000Z' },
+          { strategy: 'thumbnail_media', ok: true, attemptedAt: '2026-09-04T08:00:01.000Z' },
+        ],
+      }),
+      fetchContent,
+      putObject: vi.fn(async () => ({ etag: 'preview-etag' })),
+      markArchived,
+      recordApiCall: vi.fn(),
+    });
+
+    expect(fetchContent).toHaveBeenCalledWith(
+      'https://download.example/thumbnail',
+      { Authorization: 'signed' },
+    );
+    expect(markArchived).toHaveBeenCalledWith(record.id, expect.objectContaining({
+      archiveMethod: 'thumbnail_media',
+      contentQuality: 'preview',
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({ strategy: 'workflow_download', ok: false }),
+      ]),
+    }));
+  });
+
+  it('preserves strategy diagnostics when content download fails', async () => {
+    const failure = new Error('download connection reset');
+    await expect(archiveAttachment(record, {
+      headObject: async () => ({ exists: false }),
+      getDownload: async () => ({
+        uri: 'https://download.example/file', headers: {},
+        archiveMethod: 'legacy_file_url', contentQuality: 'original',
+        diagnostics: [{ strategy: 'workflow_download', ok: false, errorCode: 'userNotExist', attemptedAt: '2026-09-04T08:00:00.000Z' }],
+      }),
+      fetchContent: async () => { throw failure; },
+      putObject: vi.fn(), markArchived: vi.fn(), recordApiCall: vi.fn(),
+    })).rejects.toBe(failure);
+    expect(failure).toMatchObject({
+      archiveMethod: 'legacy_file_url',
+      diagnostics: [expect.objectContaining({ errorCode: 'userNotExist' })],
+    });
   });
 });

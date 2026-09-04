@@ -1,4 +1,10 @@
 import { createHash } from 'node:crypto';
+import type {
+  ArchiveMethod,
+  ContentQuality,
+  DownloadDiagnostic,
+  ResolvedDownload,
+} from './download-strategies.js';
 
 export interface PendingArchive {
   id: number;
@@ -12,6 +18,7 @@ export interface PendingArchive {
   declaredSize: number | null;
   objectKey: string;
   attempts: number;
+  thumbnailMediaId?: string;
 }
 
 interface ObjectHeadMissing {
@@ -24,6 +31,8 @@ interface ObjectHeadPresent {
   etag: string;
   contentType: string;
   sha256: string;
+  archiveMethod?: ArchiveMethod;
+  contentQuality?: ContentQuality;
 }
 
 interface ArchiveResult {
@@ -31,12 +40,15 @@ interface ArchiveResult {
   etag: string;
   contentType: string;
   sha256: string;
+  archiveMethod?: ArchiveMethod;
+  contentQuality?: ContentQuality;
+  diagnostics?: DownloadDiagnostic[];
 }
 
 export interface ArchiveDependencies {
   headObject: (objectKey: string) => Promise<ObjectHeadMissing | ObjectHeadPresent>;
-  getDownloadUri: (record: PendingArchive) => Promise<string>;
-  fetchContent: (uri: string) => Promise<{ body: Buffer; contentType: string }>;
+  getDownload: (record: PendingArchive) => Promise<ResolvedDownload>;
+  fetchContent: (uri: string, headers?: Record<string, string>) => Promise<{ body: Buffer; contentType: string }>;
   putObject: (
     objectKey: string,
     body: Buffer,
@@ -47,17 +59,25 @@ export interface ArchiveDependencies {
 }
 
 const PERMANENT_DINGTALK_FAILURES = [
-  'userNotExist',
   'noPermission',
   'invalidFileId',
   'processInstNotExist',
   'processNotExist',
   'processGetFailedByParameter',
+  'permissionDenied',
+  'dentryNotExist',
+  'object.not.exist',
 ];
 
 export function failureState(attempts: number, error?: unknown): 'retry' | 'manual_required' {
   const message = error instanceof Error ? error.message : String(error || '');
-  if (PERMANENT_DINGTALK_FAILURES.some((code) => message.includes(`"code":"${code}"`))) {
+  const diagnostics = error && typeof error === 'object' && 'diagnostics' in error && Array.isArray(error.diagnostics)
+    ? error.diagnostics as Array<{ errorCode?: string; message?: string }>
+    : [];
+  const combined = [message, ...diagnostics.flatMap((item) => [item.errorCode || '', item.message || ''])]
+    .join('\n')
+    .toLowerCase();
+  if (PERMANENT_DINGTALK_FAILURES.some((code) => combined.includes(code.toLowerCase()))) {
     return 'manual_required';
   }
   return attempts >= 5 ? 'manual_required' : 'retry';
@@ -74,24 +94,37 @@ export async function archiveAttachment(
       etag: existing.etag,
       contentType: existing.contentType,
       sha256: existing.sha256,
+      archiveMethod: existing.archiveMethod || 'minio_head_recovery',
+      contentQuality: existing.contentQuality || 'original',
     });
     return;
   }
 
-  let downloadUri: string;
+  let download: ResolvedDownload;
+  download = await dependencies.getDownload(record);
+
+  let downloaded: { body: Buffer; contentType: string };
+  const contentCallName = `attachment_content:${download.archiveMethod}`;
   try {
-    downloadUri = await dependencies.getDownloadUri(record);
-    await dependencies.recordApiCall('approval_attachment_download_url', true);
+    downloaded = await dependencies.fetchContent(download.uri, download.headers || {});
+    await Promise.resolve(dependencies.recordApiCall(contentCallName, true)).catch(() => undefined);
   } catch (error) {
-    await dependencies.recordApiCall('approval_attachment_download_url', false);
+    await Promise.resolve(dependencies.recordApiCall(contentCallName, false)).catch(() => undefined);
+    if (error && typeof error === 'object') {
+      Object.assign(error, { diagnostics: download.diagnostics, archiveMethod: download.archiveMethod });
+    }
     throw error;
   }
-
-  const downloaded = await dependencies.fetchContent(downloadUri);
-  if (record.declaredSize !== null && downloaded.body.length !== record.declaredSize) {
-    throw new Error(
+  if (
+    download.contentQuality === 'original'
+    && record.declaredSize !== null
+    && downloaded.body.length !== record.declaredSize
+  ) {
+    const error = new Error(
       `attachment size mismatch: declared=${record.declaredSize} actual=${downloaded.body.length}`,
     );
+    Object.assign(error, { code: 'attachment_size_mismatch', diagnostics: download.diagnostics, archiveMethod: download.archiveMethod });
+    throw error;
   }
   const sha256 = createHash('sha256').update(downloaded.body).digest('hex');
   const metadata = {
@@ -103,12 +136,25 @@ export async function archiveAttachment(
     'x-amz-meta-sha256': sha256,
     'x-amz-meta-process-instance-id': record.processInstanceId,
     'x-amz-meta-file-id': record.fileId,
+    'x-amz-meta-archive-method': download.archiveMethod,
+    'x-amz-meta-content-quality': download.contentQuality,
   };
-  const uploaded = await dependencies.putObject(record.objectKey, downloaded.body, metadata);
+  let uploaded: { etag?: string } | void;
+  try {
+    uploaded = await dependencies.putObject(record.objectKey, downloaded.body, metadata);
+  } catch (error) {
+    if (error && typeof error === 'object') {
+      Object.assign(error, { diagnostics: download.diagnostics, archiveMethod: download.archiveMethod });
+    }
+    throw error;
+  }
   await dependencies.markArchived(record.id, {
     actualSize: downloaded.body.length,
     etag: uploaded?.etag ?? '',
     contentType: downloaded.contentType || 'application/octet-stream',
     sha256,
+    archiveMethod: download.archiveMethod,
+    contentQuality: download.contentQuality,
+    diagnostics: download.diagnostics,
   });
 }
