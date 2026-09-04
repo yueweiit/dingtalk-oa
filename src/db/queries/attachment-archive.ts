@@ -139,12 +139,14 @@ export async function markAttachmentFailed(id: number, attempts: number, error: 
 export async function requeueHistoricalRecoveryCanaries(limitProcesses = 5): Promise<number> {
   return withTransaction(async (client) => {
     const { rowCount } = await client.query(
-      `WITH samples AS (
-         SELECT DISTINCT ON (process_instance_id) id
+      `WITH ranked AS (
+         SELECT id, created_at,
+                row_number() OVER (PARTITION BY process_instance_id ORDER BY created_at, id) AS process_row
            FROM costing_read.attachment_archive
           WHERE archive_status = 'manual_required'
             AND (failure_code = 'userNotExist' OR last_error ILIKE '%userNotExist%')
-          ORDER BY process_instance_id, id
+       ), samples AS (
+         SELECT id FROM ranked WHERE process_row=1 ORDER BY created_at, id
           LIMIT $1
        )
        UPDATE costing_read.attachment_archive a
