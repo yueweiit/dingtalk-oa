@@ -49,6 +49,10 @@ class RateLimiter {
 // 钉钉 API 限流：40次/秒，留余量用 30
 const rateLimiter = new RateLimiter(10, 30);
 
+export async function acquireDingTalkApiSlot(): Promise<void> {
+  await rateLimiter.acquire();
+}
+
 interface ApiCallOptions {
   method?: 'GET' | 'POST';
   body?: Record<string, unknown>;
