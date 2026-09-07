@@ -10,6 +10,7 @@ import { startScheduler, stopScheduler } from './jobs/scheduler.js';
 import { processApprovalMessage } from './normalize/orchestrator.js';
 import { tokenManager } from './dingtalk/token-manager.js';
 import { syncTemplateNames } from './jobs/sync-template-names.js';
+import { startPackingRefreshWorker, stopPackingRefreshWorker } from './packing/refresh-worker.js';
 
 async function main() {
   console.log('🚀 钉钉审批数据归档系统启动中...');
@@ -77,6 +78,9 @@ async function main() {
   startScheduler();
   console.log('✅ Cron 调度器启动成功');
 
+  startPackingRefreshWorker();
+  console.log('✅ 装箱工作簿刷新任务启动成功');
+
   // 9. 注册优雅关闭
   let isShuttingDown = false;
   const gracefulShutdown = async (signal: string) => {
@@ -93,6 +97,9 @@ async function main() {
     try {
       stopScheduler();
       console.log('✅ 定时任务已停止');
+
+      stopPackingRefreshWorker();
+      console.log('✅ 装箱工作簿刷新任务已停止');
 
       stopEventOutbox();
 
