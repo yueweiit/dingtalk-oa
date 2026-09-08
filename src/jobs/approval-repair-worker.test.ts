@@ -51,6 +51,25 @@ describe('approval repair worker', () => {
     expect(deps.markFailure).not.toHaveBeenCalled();
   });
 
+  it('accepts legacy detail responses that omit processInstanceId', async () => {
+    const deps = dependencies({
+      fetchInstance: vi.fn().mockResolvedValue({
+        businessId: request.expectedBusinessId,
+        processCode: request.expectedProcessCode,
+        status: 'RUNNING',
+      }),
+    });
+
+    await processApprovalRepairRequest(request, deps);
+
+    expect(deps.persistInstance).toHaveBeenCalledWith({
+      corpId: request.corpId,
+      processInstanceId: request.processInstanceId,
+      processCode: request.expectedProcessCode,
+    }, expect.objectContaining({ businessId: request.expectedBusinessId }));
+    expect(deps.markFailure).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['instance id', { processInstanceId: 'OTHER', businessId: request.expectedBusinessId, processCode: request.expectedProcessCode }, 'instance_id_mismatch'],
     ['business id', { processInstanceId: request.processInstanceId, businessId: 'OTHER', processCode: request.expectedProcessCode }, 'business_id_mismatch'],

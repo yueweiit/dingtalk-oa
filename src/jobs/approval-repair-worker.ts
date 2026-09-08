@@ -47,7 +47,10 @@ export async function processApprovalRepairRequest(
     const instanceId = String(detail.processInstanceId || '').trim();
     const businessId = String(detail.businessId || '').trim();
     const processCode = String(detail.processCode || '').trim();
-    if (instanceId !== request.processInstanceId) {
+    // Older workflow detail responses do not always echo processInstanceId.
+    // The endpoint itself is addressed by the requested ID, so only reject an
+    // explicit conflicting value; businessId and processCode remain mandatory.
+    if (instanceId && instanceId !== request.processInstanceId) {
       throw repairError('instance_id_mismatch', '钉钉返回的流程实例 ID 与修复请求不一致');
     }
     if (businessId !== request.expectedBusinessId) {
