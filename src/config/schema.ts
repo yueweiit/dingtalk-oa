@@ -61,6 +61,7 @@ export const configSchema = z.object({
   APPROVAL_STATUS_RECONCILE_CRON: z.string().default('*/15 * * * *'),
   APPROVAL_STATUS_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(100),
   APPROVAL_STATUS_RECONCILE_DELAY_MS: z.coerce.number().int().min(0).max(10_000).default(500),
+  APPROVAL_REPAIR_POLL_MS: z.coerce.number().int().min(1000).max(60_000).default(5000),
 
   // 成本系统附件归档（MinIO 只使用专用非 root 账号）
   ARCHIVE_MINIO_ENDPOINT: z.string().default('172.19.49.226'),

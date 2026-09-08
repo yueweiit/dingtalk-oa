@@ -33,21 +33,13 @@ export interface RefreshApprovalInstanceParams {
 }
 
 /**
- * 从钉钉读取实例详情并按既有归档口径写入，供事件与状态核对共用。
+ * 将已经过调用方校验的审批详情按标准事务口径落库。
+ * 修复队列会先核对实例、审批编号和模板，再调用这里，避免再次请求钉钉。
  */
-export async function refreshApprovalInstance(
-  params: RefreshApprovalInstanceParams
-): Promise<ApprovalInstanceDetail> {
-  let instanceDetail: ApprovalInstanceDetail;
-  try {
-    instanceDetail = await getInstance(params.processInstanceId);
-  } catch (apiError: any) {
-    const errorDetail = apiError.name === 'ZodError'
-      ? JSON.stringify(apiError.errors, null, 2)
-      : apiError.message;
-    throw new Error(`getInstance 失败: ${errorDetail}`);
-  }
-
+export async function persistApprovalInstance(
+  params: RefreshApprovalInstanceParams,
+  instanceDetail: ApprovalInstanceDetail,
+): Promise<void> {
   await withTransaction(async (client) => {
     const normalizedInstance = normalizeInstance(params.corpId, instanceDetail, {
       processInstanceId: params.processInstanceId,
@@ -62,10 +54,7 @@ export async function refreshApprovalInstance(
         params.processInstanceId,
         instanceDetail.tasks
       );
-
-      for (const task of normalizedTasks) {
-        await upsertTask(task, client);
-      }
+      for (const task of normalizedTasks) await upsertTask(task, client);
     }
 
     if (instanceDetail.formComponentValues) {
@@ -84,6 +73,25 @@ export async function refreshApprovalInstance(
       console.error('[Orchestrator] 用户快照处理失败:', error);
     });
   }
+}
+
+/**
+ * 从钉钉读取实例详情并按既有归档口径写入，供事件与状态核对共用。
+ */
+export async function refreshApprovalInstance(
+  params: RefreshApprovalInstanceParams
+): Promise<ApprovalInstanceDetail> {
+  let instanceDetail: ApprovalInstanceDetail;
+  try {
+    instanceDetail = await getInstance(params.processInstanceId);
+  } catch (apiError: any) {
+    const errorDetail = apiError.name === 'ZodError'
+      ? JSON.stringify(apiError.errors, null, 2)
+      : apiError.message;
+    throw new Error(`getInstance 失败: ${errorDetail}`);
+  }
+
+  await persistApprovalInstance(params, instanceDetail);
 
   return instanceDetail;
 }
