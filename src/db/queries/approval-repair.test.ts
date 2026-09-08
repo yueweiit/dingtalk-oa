@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 describe('approval repair queue migration', () => {
   it('exposes an idempotent submit function and a read-only status view', () => {
     const migrationPath = fileURLToPath(new URL(
-      '../../../migrations/20260908000000_create_approval_repair_queue.cjs',
+      '../../../migrations/1788856369000_create_approval_repair_queue.cjs',
       import.meta.url,
     ));
     const sql = readFileSync(migrationPath, 'utf8');
