@@ -49,14 +49,15 @@ export async function processApprovalRepairRequest(
     const processCode = String(detail.processCode || '').trim();
     // Older workflow detail responses do not always echo processInstanceId.
     // The endpoint itself is addressed by the requested ID, so only reject an
-    // explicit conflicting value; businessId and processCode remain mandatory.
+    // explicit conflicting value. The SECURITY DEFINER submit function already
+    // verifies the requested process code against the enabled purpose whitelist.
     if (instanceId && instanceId !== request.processInstanceId) {
       throw repairError('instance_id_mismatch', '钉钉返回的流程实例 ID 与修复请求不一致');
     }
     if (businessId !== request.expectedBusinessId) {
       throw repairError('business_id_mismatch', '钉钉返回的审批编号与综合成本记录不一致');
     }
-    if (processCode !== request.expectedProcessCode) {
+    if (processCode && processCode !== request.expectedProcessCode) {
       throw repairError('process_code_mismatch', '钉钉返回的流程模板与白名单模板不一致');
     }
     await dependencies.persistInstance({
@@ -67,7 +68,7 @@ export async function processApprovalRepairRequest(
     await dependencies.enqueueAttachments(request, detail);
     await dependencies.markSuccess(request.id, {
       fetchedBusinessId: businessId,
-      fetchedProcessCode: processCode,
+      fetchedProcessCode: processCode || request.expectedProcessCode,
     });
   } catch (error) {
     await dependencies.markFailure(request.id, error, retryable(error));

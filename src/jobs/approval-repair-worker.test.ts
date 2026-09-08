@@ -51,11 +51,10 @@ describe('approval repair worker', () => {
     expect(deps.markFailure).not.toHaveBeenCalled();
   });
 
-  it('accepts legacy detail responses that omit processInstanceId', async () => {
+  it('accepts legacy detail responses that omit echoed instance and process identifiers', async () => {
     const deps = dependencies({
       fetchInstance: vi.fn().mockResolvedValue({
         businessId: request.expectedBusinessId,
-        processCode: request.expectedProcessCode,
         status: 'RUNNING',
       }),
     });
@@ -67,6 +66,10 @@ describe('approval repair worker', () => {
       processInstanceId: request.processInstanceId,
       processCode: request.expectedProcessCode,
     }, expect.objectContaining({ businessId: request.expectedBusinessId }));
+    expect(deps.markSuccess).toHaveBeenCalledWith(request.id, {
+      fetchedBusinessId: request.expectedBusinessId,
+      fetchedProcessCode: request.expectedProcessCode,
+    });
     expect(deps.markFailure).not.toHaveBeenCalled();
   });
 
