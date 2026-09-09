@@ -395,3 +395,7 @@ npx tsx check-db.ts
 ## License
 
 MIT
+
+## 物流结算归档只读契约
+
+审批与附件 v2 视图、已完成审批轮转复查、迁移与配置说明见 [物流结算归档契约](docs/logistics-settlement-archive.md)。

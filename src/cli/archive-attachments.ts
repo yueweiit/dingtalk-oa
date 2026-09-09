@@ -1,4 +1,3 @@
-import { extractAttachmentCandidates } from '../archive/attachment-extractor.js';
 import { archiveAttachment } from '../archive/archive-job.js';
 import { resolveDingTalkArchiveDownload } from '../archive/dingtalk-download.js';
 import { headArchivedObject, putArchivedObject } from '../archive/minio-archive.js';
@@ -10,7 +9,8 @@ import {
   markAttachmentFailed,
   recordApiUsage,
   updateArchiveHealth,
-  upsertAttachmentCandidates,
+  synchronizeInstanceAttachments,
+  retireIneligibleAttachments,
 } from '../db/queries/attachment-archive.js';
 import { closePool } from '../db/pool.js';
 import {
@@ -48,16 +48,11 @@ async function run(): Promise<void> {
   let failedCount = 0;
   await updateArchiveHealth({ startedAt, completed: false, success: false, scannedCount, processedCount });
   try {
+    await retireIneligibleAttachments();
     const instances = await listWhitelistedInstances();
     scannedCount = instances.length;
     for (const instance of instances) {
-      const candidates = extractAttachmentCandidates({
-        corpId: instance.corp_id,
-        processInstanceId: instance.process_instance_id,
-        processCode: instance.process_code,
-        rawPayload: instance.raw_payload,
-      });
-      await upsertAttachmentCandidates(candidates);
+      await synchronizeInstanceAttachments(instance.corp_id, instance.process_instance_id);
     }
 
     const pending = await claimPendingAttachments(
@@ -90,7 +85,7 @@ async function run(): Promise<void> {
           }),
           fetchContent: fetchAttachment,
           putObject: putArchivedObject,
-          markArchived: markAttachmentArchived,
+          markArchived: (id, result) => markAttachmentArchived(id, result, record.objectKey),
           // API 客户端记录签名地址请求；这里单独记录文件内容请求。
           recordApiCall: recordApiUsage,
         });
@@ -99,7 +94,7 @@ async function run(): Promise<void> {
         failedCount += 1;
         // A recovery canary has already exhausted every configured strategy once;
         // do not let the normal timer repeat the same quota-consuming chain.
-        await markAttachmentFailed(record.id, record.recoveryCanary ? 5 : record.attempts, error);
+        await markAttachmentFailed(record.id, record.recoveryCanary ? 5 : record.attempts, error, record.objectKey);
         console.error(`[Archive] ${record.processInstanceId}/${record.fileId} 归档失败:`, error);
       }
       if (index + 1 < pending.length) await delay(config.ARCHIVE_DELAY_MS);

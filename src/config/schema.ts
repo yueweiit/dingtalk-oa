@@ -62,6 +62,13 @@ export const configSchema = z.object({
   APPROVAL_STATUS_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(100),
   APPROVAL_STATUS_RECONCILE_DELAY_MS: z.coerce.number().int().min(0).max(10_000).default(500),
 
+  // 已完成物流/物流采购的评论及附件轮转复查；迁移部署后显式启用。
+  COMPLETED_APPROVAL_REFRESH_ENABLED: z.string().default('false').transform((value) => ['1', 'true', 'yes', 'on'].includes(value.toLowerCase())),
+  COMPLETED_APPROVAL_REFRESH_CRON: z.string().default('*/30 * * * *'),
+  COMPLETED_APPROVAL_REFRESH_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(10),
+  COMPLETED_APPROVAL_REFRESH_DELAY_MS: z.coerce.number().int().min(500).max(10_000).default(1000),
+  COMPLETED_APPROVAL_REFRESH_MIN_INTERVAL_SECONDS: z.coerce.number().int().min(60).max(604800).default(21600),
+
   // 成本系统附件归档（MinIO 只使用专用非 root 账号）
   ARCHIVE_MINIO_ENDPOINT: z.string().default('172.19.49.226'),
   ARCHIVE_MINIO_PORT: z.coerce.number().int().min(1).max(65535).default(9000),

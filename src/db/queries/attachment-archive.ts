@@ -1,14 +1,14 @@
 import type pg from 'pg';
 import { withClient, withTransaction } from '../pool.js';
-import type { AttachmentCandidate } from '../../archive/attachment-extractor.js';
+import { extractAttachmentCandidates, type AttachmentCandidate } from '../../archive/attachment-extractor.js';
 import { failureState, type PendingArchive } from '../../archive/archive-job.js';
 import { AttachmentDownloadStrategiesError } from '../../archive/download-strategies.js';
 
 const BUCKET = process.env.ARCHIVE_MINIO_BUCKET || 'dingtalk-approval-archive';
 
-export async function upsertAttachmentCandidates(candidates: AttachmentCandidate[]): Promise<number> {
+export async function upsertAttachmentCandidates(candidates: AttachmentCandidate[], client?: pg.PoolClient): Promise<number> {
   if (!candidates.length) return 0;
-  return withTransaction(async (client) => {
+  const run = async (client: pg.PoolClient) => {
     for (const row of candidates) {
       await client.query(
         `INSERT INTO costing_read.attachment_archive (
@@ -18,15 +18,28 @@ export async function upsertAttachmentCandidates(candidates: AttachmentCandidate
            thumbnail_media_id
          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
          ON CONFLICT (corp_id, process_instance_id, file_id) DO UPDATE SET
-           space_id = COALESCE(EXCLUDED.space_id, costing_read.attachment_archive.space_id),
-           file_name = COALESCE(EXCLUDED.file_name, costing_read.attachment_archive.file_name),
-           declared_size = COALESCE(EXCLUDED.declared_size, costing_read.attachment_archive.declared_size),
-           comment_user_id = COALESCE(EXCLUDED.comment_user_id, costing_read.attachment_archive.comment_user_id),
-           comment_user_name = COALESCE(EXCLUDED.comment_user_name, costing_read.attachment_archive.comment_user_name),
-           comment_time = COALESCE(EXCLUDED.comment_time, costing_read.attachment_archive.comment_time),
-           comment_remark = COALESCE(EXCLUDED.comment_remark, costing_read.attachment_archive.comment_remark),
-           thumbnail_media_id = COALESCE(EXCLUDED.thumbnail_media_id, costing_read.attachment_archive.thumbnail_media_id),
-           updated_at = now()`,
+           process_code = EXCLUDED.process_code,
+           attachment_origin = EXCLUDED.attachment_origin,
+           space_id = EXCLUDED.space_id,
+           file_name = EXCLUDED.file_name,
+           declared_size = EXCLUDED.declared_size,
+           comment_user_id = EXCLUDED.comment_user_id,
+           comment_user_name = EXCLUDED.comment_user_name,
+           comment_time = EXCLUDED.comment_time,
+           comment_remark = EXCLUDED.comment_remark,
+           thumbnail_media_id = EXCLUDED.thumbnail_media_id,
+           retired_at = NULL,
+           updated_at = clock_timestamp()
+         WHERE (attachment_archive.process_code, attachment_archive.attachment_origin,
+                attachment_archive.space_id, attachment_archive.file_name, attachment_archive.declared_size,
+                attachment_archive.comment_user_id, attachment_archive.comment_user_name,
+                attachment_archive.comment_time, attachment_archive.comment_remark,
+                attachment_archive.thumbnail_media_id, attachment_archive.retired_at)
+           IS DISTINCT FROM
+               (EXCLUDED.process_code, EXCLUDED.attachment_origin,
+                EXCLUDED.space_id, EXCLUDED.file_name, EXCLUDED.declared_size,
+                EXCLUDED.comment_user_id, EXCLUDED.comment_user_name,
+                EXCLUDED.comment_time, EXCLUDED.comment_remark, EXCLUDED.thumbnail_media_id, NULL)`,
         [
           row.corpId, row.processInstanceId, row.processCode, row.origin,
           row.fileId, row.spaceId || null, row.fileName || null, row.declaredSize,
@@ -37,7 +50,8 @@ export async function upsertAttachmentCandidates(candidates: AttachmentCandidate
       );
     }
     return candidates.length;
-  });
+  };
+  return client ? run(client) : withTransaction(run);
 }
 
 export async function claimPendingAttachments(limit: number, recoveryCanariesOnly = false): Promise<PendingArchive[]> {
@@ -51,6 +65,7 @@ export async function claimPendingAttachments(limit: number, recoveryCanariesOnl
               AND updated_at <= now() - (LEAST(3600, 60 * (1 << attempts)) * interval '1 second'))
             OR (archive_status = 'archiving' AND claimed_at < now() - interval '15 minutes')
           )
+            AND retired_at IS NULL
             AND attempts < 5
             AND (NOT $2::boolean OR recovery_canary)
           ORDER BY updated_at ASC, id ASC
@@ -98,6 +113,7 @@ export async function markAttachmentArchived(
     contentQuality?: string;
     diagnostics?: unknown[];
   },
+  objectKey: string,
 ): Promise<void> {
   await withClient((client) => client.query(
     `UPDATE costing_read.attachment_archive
@@ -107,14 +123,14 @@ export async function markAttachmentArchived(
             diagnostic_json=COALESCE($8::jsonb, diagnostic_json),
             failure_code=NULL, last_attempt_strategy=COALESCE($6, last_attempt_strategy),
             archived_at=now(), last_error=NULL, updated_at=now()
-      WHERE id=$1`,
+      WHERE id=$1 AND object_key=$9 AND retired_at IS NULL AND archive_status='archiving'`,
     [id, result.actualSize, result.etag, result.contentType, result.sha256,
       result.archiveMethod || null, result.contentQuality || null,
-      result.diagnostics ? JSON.stringify(result.diagnostics) : null],
+      result.diagnostics ? JSON.stringify(result.diagnostics) : null, objectKey],
   ).then(() => undefined));
 }
 
-export async function markAttachmentFailed(id: number, attempts: number, error: unknown): Promise<void> {
+export async function markAttachmentFailed(id: number, attempts: number, error: unknown, objectKey: string): Promise<void> {
   const status = failureState(attempts, error);
   const message = error instanceof Error ? error.message : String(error);
   const diagnostics = error instanceof AttachmentDownloadStrategiesError
@@ -130,9 +146,9 @@ export async function markAttachmentFailed(id: number, attempts: number, error: 
     `UPDATE costing_read.attachment_archive
         SET archive_status=$2, last_error=$3, failure_code=$4,
             last_attempt_strategy=$5, diagnostic_json=$6::jsonb, updated_at=now()
-      WHERE id=$1`,
+      WHERE id=$1 AND object_key=$7 AND retired_at IS NULL AND archive_status='archiving'`,
     [id, status, message.slice(0, 4000), failureCode.slice(0, 128),
-      lastDiagnostic?.strategy || null, JSON.stringify(diagnostics)],
+      lastDiagnostic?.strategy || null, JSON.stringify(diagnostics), objectKey],
   ).then(() => undefined));
 }
 
@@ -197,9 +213,7 @@ export async function listWhitelistedInstances(): Promise<Array<{
   return withClient(async (client) => {
     const { rows } = await client.query(
       `SELECT corp_id, process_instance_id, process_code, raw_payload
-         FROM costing_read.approval_instances_v1
-         JOIN costing_read.allowed_process_template USING (process_code)
-        WHERE archive_attachments
+         FROM costing_read.eligible_attachment_instances
         ORDER BY updated_at ASC`,
     );
     return rows;
@@ -225,4 +239,45 @@ export async function updateArchiveHealth(params: {
     [params.startedAt, params.completed, params.success, message?.slice(0, 4000) || null,
       params.scannedCount, params.processedCount],
   ).then(() => undefined));
+}
+
+
+export async function synchronizeInstanceAttachments(
+  corpId: string, processInstanceId: string, client?: pg.PoolClient,
+): Promise<number> {
+  const run = async (c: pg.PoolClient) => {
+    await c.query(`SELECT 1 FROM public.ding_approval_instance
+      WHERE corp_id=$1 AND process_instance_id=$2 FOR UPDATE`, [corpId, processInstanceId]);
+    const { rows } = await c.query(`SELECT * FROM costing_read.eligible_attachment_instances
+      WHERE corp_id=$1 AND process_instance_id=$2`, [corpId, processInstanceId]);
+    const instance = rows[0];
+    const candidates = instance ? extractAttachmentCandidates({
+      corpId, processInstanceId, processCode: instance.process_code,
+      rawPayload: { ...instance.raw_payload, formComponentValues:
+        instance.raw_payload?.formComponentValues ?? instance.raw_payload?.form_component_values ?? instance.form_component_values },
+    }) : [];
+    await upsertAttachmentCandidates(candidates, c);
+    await c.query(`UPDATE costing_read.attachment_archive
+      SET retired_at=clock_timestamp(), updated_at=clock_timestamp()
+      WHERE corp_id=$1 AND process_instance_id=$2 AND retired_at IS NULL
+        AND NOT (file_id = ANY($3::text[]))`, [corpId, processInstanceId, candidates.map(row => row.fileId)]);
+    return candidates.length;
+  };
+  return client ? run(client) : withTransaction(run);
+}
+
+export async function retireIneligibleAttachments(): Promise<void> {
+  const instances = await withClient(async (client) => {
+    const { rows } = await client.query<{ corp_id: string; process_instance_id: string }>(`
+      SELECT DISTINCT a.corp_id, a.process_instance_id FROM costing_read.attachment_archive a
+      WHERE a.retired_at IS NULL AND NOT EXISTS (
+        SELECT 1 FROM costing_read.eligible_attachment_instances i
+        WHERE i.corp_id=a.corp_id AND i.process_instance_id=a.process_instance_id
+      )`);
+    return rows;
+  });
+  for (const instance of instances) {
+    // Re-read eligibility under the same source lock as event/backfill writers.
+    await synchronizeInstanceAttachments(instance.corp_id, instance.process_instance_id);
+  }
 }

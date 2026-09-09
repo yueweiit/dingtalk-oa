@@ -1,0 +1,92 @@
+# Logistics settlement archive contract
+
+The cost system reads PostgreSQL and MinIO only. DingTalk requests remain in this upstream service. This change adds no cost-system write endpoint, no DingTalk write operation, and no new MinIO credential.
+
+## Database rollout
+
+Apply `migrations/20260909000000_logistics_settlement_archive.cjs` with the existing migration owner before deploying this application code. It depends on the approval-instance and existing costing archive/diagnostics migrations. `npm run migrate:up` applies pending migrations through the normal deployment connection. The migration has been tested on a disposable local PostgreSQL database; it has not been applied to a live database.
+
+The existing `allowed_process_template` rows must use `purpose='international_logistics'` with `archive_attachments=true` for main logistics, and `purpose='purchase_expense'` for purchase expenses. Keep purchase `archive_attachments=false`: purchase eligibility is evaluated per approval category, never by enabling the entire purchase template. No process codes are added automatically. Unknown categories remain visible in the approval contract for downstream review and are not queued for attachment download.
+
+The migration adds two triggers, `retired_at` on the attachment manifest, the completed-refresh ledger, and the views below. It retains v1 column names and types. Existing attachments whose approval is deleted or outside the current attachment scope are marked retired. The next existing `archive:attachments` scan reconciles current attachment lists and discovers eligible historical purchase attachments. Event/backfill/completed-refresh writes thereafter reconcile the source and manifest in one transaction, under a per-instance row lock.
+
+If `costing_reader` exists, the migration grants schema usage and SELECT on the three new public views. It grants no base-table access or write privileges. If the role is provisioned later, grant only:
+
+```sql
+GRANT USAGE ON SCHEMA costing_read TO costing_reader;
+GRANT SELECT ON costing_read.approval_instances_v2,
+  costing_read.attachment_archives_v2,
+  costing_read.completed_approval_refresh_v1 TO costing_reader;
+```
+
+Deploy the prior application before rolling the migration down. Down restores the original v1 attachment filter and removes v2/refresh state; it does not delete MinIO objects.
+
+## Read-only views
+
+`costing_read.approval_instances_v2` contains **every approval from every allowlisted template**, including deleted sources. Its key is `(corp_id, process_instance_id)` and its columns are the existing v1 columns followed by `deleted_at`:
+
+```text
+corp_id, process_instance_id, business_id, process_code, title, status, result,
+originator_user_id, originator_user_name, originator_dept_id, originator_dept_name,
+create_time, finish_time, form_component_values, raw_payload, last_event_time,
+updated_at, deleted_at
+```
+
+`deleted_at IS NOT NULL` is a retained tombstone; it is not an absent row. `raw_payload` retains the complete existing normalized DingTalk detail, including operation records/comments and attachment references. Any persisted source-content change, including a completed approval's comment change or deletion, advances `updated_at`. An identical poll only advances `last_event_time`; it does not create a source change. The existing running-approval rotation now orders by that successful-check time rather than the content-change timestamp.
+
+`costing_read.attachment_archives_v2` retains manifest rows for allowlisted sources. Its key is `(corp_id, process_instance_id, file_id)` and its columns are existing v1 columns followed by `retired_at`:
+
+```text
+corp_id, process_instance_id, process_code, attachment_origin, file_id, space_id,
+file_name, declared_size, bucket, object_key, actual_size, content_type, etag,
+sha256, archive_status, attempts, last_error, comment_user_id, comment_user_name,
+comment_time, comment_remark, archived_at, updated_at, archive_method,
+content_quality, failure_code, last_attempt_strategy, diagnostic_json,
+recovery_canary, retired_at
+```
+
+Removal from the source, deletion of its approval, or a category change outside the allowed attachment scope sets `retired_at` and advances `updated_at`. Reappearance clears the retirement marker. A retired row is kept for audit and is excluded from download claims. V1 exposes only currently eligible, unretired attachments; its columns are unchanged.
+
+New or changed attachment metadata, archive progress, and retirement all advance manifest `updated_at`; identical scans do not. A changed file name, size, space, or thumbnail reference creates a versioned object key and requeues downloading. Old worker results cannot replace the newer manifest version. Read `bucket` and `object_key` verbatim; do not derive the key from the file ID. Read MinIO content only after `archive_status='archived'` and `retired_at IS NULL`, and preserve `content_quality` so a preview is not treated as an original. Existing download retry limits, API throttling, and MinIO recovery remain in use. DingTalk file IDs and exposed file descriptors are the available change signals; upstream cannot detect a remote byte mutation that changes neither.
+
+Initial consumers must read the complete v2 approval set, not just current/eligible logistics rows. Incremental consumers should independently track approval and attachment updates, retain tombstones, use `(updated_at, corp_id, process_instance_id[, file_id])` for deterministic paging, and replay an overlap interval idempotently. Timestamp fields are not a transactional change-log sequence; an overlapping replay avoids missing a transaction that commits after another reader has observed a newer timestamp. A periodic complete reconciliation provides coverage beyond the overlap interval.
+
+`costing_read.completed_approval_refresh_v1` exposes `(corp_id, process_instance_id, last_checked_at, last_success_at, last_error, lease_until)` for operational inspection. `last_checked_at` means an attempted/claimed refresh, including failures; it is separate from source `updated_at` and is not a source-change watermark.
+
+## Eligible purchase paths
+
+The SQL classifier accepts an explicit category path containing both `服务类采购` / `Compra De Servicios` and `物流及运输服务` / `Servicios de logística y transporte` in a named procurement-category field. It also accepts the actual split-field form:
+
+```text
+采购支出Gastos de Compra = 服务类采购Compra De Servicios
+服务类采购 Adquisiciones de servicios = 物流及运输服务Servicios de logística y transporte
+```
+
+A commodity-purchase parent, missing/unknown category, or matching words in remarks does not qualify. International logistics attachments continue to follow the existing allowlist flag. All unrelated approvals remain available as raw approval rows to the authorized reader, but their attachments are not newly archived by this collector.
+
+## Completed approval polling
+
+Enable after the migration and application are deployed:
+
+```dotenv
+COMPLETED_APPROVAL_REFRESH_ENABLED=true
+COMPLETED_APPROVAL_REFRESH_CRON=*/30 * * * *
+COMPLETED_APPROVAL_REFRESH_BATCH_SIZE=10
+COMPLETED_APPROVAL_REFRESH_DELAY_MS=1000
+COMPLETED_APPROVAL_REFRESH_MIN_INTERVAL_SECONDS=21600
+```
+
+The shipped default is disabled until explicitly enabled. The defaults select at most 10 approvals per 30-minute invocation, with one second between requests and at least six hours between attempts for an individual approval. Batch size is validated in 1–100, delay in 500–10000 ms, and the per-approval interval in 60–604800 seconds. API retries may add requests beyond the selected approval count.
+
+Only nondeleted, completed logistics or logistics-service purchase approvals enter the rotation. Selection orders by durable `last_checked_at` with unvisited rows first; each claim advances this timestamp before calling DingTalk. A failure cannot hold the head of the queue. Fifteen-minute leases exclude active claims, expire after a crash, and carry a generation to prevent a stale worker from releasing a newer lease. The scheduler suppresses overlapping in-process invocations. Refreshes use the existing API client, retries, accounting, normalization, and transactional source/attachment synchronization. The existing attachment archive timer downloads newly pending files separately.
+
+## Local verification
+
+`npm run test:run` runs unit tests. PostgreSQL contract tests are opt-in and require a **disposable** loopback database named `settlement_test*`; the tests truncate their fixture tables and exercise migration down/up. They never call DingTalk or MinIO.
+
+```sh
+SETTLEMENT_TEST_DATABASE_URL=postgresql://USER@127.0.0.1:PORT/settlement_test npm run test:run
+npm run build
+```
+
+Coverage includes allowlist/tombstones, the actual bilingual split category, commodity/comment exclusions, comment attachment additions/changes/removals, stable no-op timestamps, versioned archive recovery, durable fair rotation after failure/reconnect, existing running rotation, read-only grants, and periodic scheduling overlap protection.
