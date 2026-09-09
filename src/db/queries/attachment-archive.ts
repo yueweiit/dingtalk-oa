@@ -54,6 +54,7 @@ export async function upsertAttachmentCandidates(candidates: AttachmentCandidate
   return client ? run(client) : withTransaction(run);
 }
 
+// Each claim writes a distinct object: SQL fencing alone cannot stop a stale PUT.
 export async function claimPendingAttachments(limit: number, recoveryCanariesOnly = false): Promise<PendingArchive[]> {
   return withTransaction(async (client) => {
     const { rows } = await client.query(
@@ -75,6 +76,10 @@ export async function claimPendingAttachments(limit: number, recoveryCanariesOnl
        UPDATE costing_read.attachment_archive a
           SET archive_status = 'archiving', attempts = attempts + 1,
               claim_generation = a.claim_generation + 1,
+              object_key = concat_ws('/', split_part(a.object_key, '/', 1),
+                split_part(a.object_key, '/', 2), split_part(a.object_key, '/', 3))
+                || '/revision-' || a.revision_generation::text
+                || '/claim-' || (a.claim_generation + 1)::text,
               claimed_at = now(), updated_at = now()
          FROM picked
         WHERE a.id = picked.id

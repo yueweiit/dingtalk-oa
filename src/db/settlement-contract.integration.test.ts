@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { archiveAttachment, type PendingArchive } from '../archive/archive-job.js';
+import { archiveAttachment, type ArchiveDependencies, type PendingArchive } from '../archive/archive-job.js';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
@@ -369,6 +369,57 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
       { file_id: 'revision-a', object_key: 'corp-1/log/revision-a/revision-1' },
       { file_id: 'revision-b', object_key: 'corp-1/log/revision-b/revision-1' },
     ]);
+  });
+
+
+  it('keeps a reclaimed original object intact when the stale preview worker PUT finishes later', async () => {
+    await upsertInstance({ corp_id: 'corp-1', process_instance_id: 'log', process_code: 'LOG', status: 'COMPLETED',
+      raw_payload: { operationRecords: [{ files: [{ fileId: 'race', fileSize: 11 }] }] } });
+    const objects = new Map<string, Buffer>();
+    const original = Buffer.alloc(11, 'b');
+    const preview = Buffer.alloc(5, 'a');
+    let signalPreviewStarted!: () => void;
+    const previewStarted = new Promise<void>(resolve => { signalPreviewStarted = resolve; });
+    let releasePreview!: () => void;
+    const previewReleased = new Promise<void>(resolve => { releasePreview = resolve; });
+    const dependencies = (
+      record: PendingArchive, quality: 'preview' | 'original', fetchBody: () => Promise<Buffer>,
+    ): ArchiveDependencies => ({
+      headObject: async (key) => {
+        const body = objects.get(key);
+        return body ? { exists: true, size: body.length, etag: 'head-etag', contentType: 'application/pdf',
+          sha256: createHash('sha256').update(body).digest('hex') } : { exists: false };
+      },
+      getDownload: async () => ({ uri: 'https://local.invalid/file', headers: {},
+        archiveMethod: 'workflow_download', contentQuality: quality, diagnostics: [] }),
+      fetchContent: async () => ({ body: await fetchBody(), contentType: 'application/pdf' }),
+      putObject: async (key, body) => { objects.set(key, body); return { etag: quality }; },
+      markArchived: (id, result) => markAttachmentArchived(id, result, record.objectKey, record.claimGeneration),
+      recordApiCall: async () => undefined,
+    });
+    const [stale] = await claimPendingAttachments(1);
+    const staleWork = archiveAttachment(stale, dependencies(stale, 'preview', async () => {
+      signalPreviewStarted();
+      await previewReleased;
+      return preview;
+    }));
+    await previewStarted;
+    await client.query("UPDATE costing_read.attachment_archive SET claimed_at=now()-interval '16 minutes'");
+    const [current] = await claimPendingAttachments(1);
+    await archiveAttachment(current, dependencies(current, 'original', async () => original));
+    const published = (await client.query('SELECT * FROM costing_read.attachment_archives_v2')).rows[0];
+    expect(published.archive_status).toBe('archived');
+    expect(objects.get(published.object_key)).toEqual(original);
+    releasePreview();
+    await staleWork;
+    const afterLatePut = (await client.query('SELECT * FROM costing_read.attachment_archives_v2')).rows[0];
+    expect(objects.get(afterLatePut.object_key)).toEqual(original);
+    expect(afterLatePut.actual_size).toBe('11');
+    expect(afterLatePut.content_quality).toBe('original');
+    expect(afterLatePut.sha256).toBe(createHash('sha256').update(objects.get(afterLatePut.object_key)!).digest('hex'));
+    expect(afterLatePut.object_key).toBe(current.objectKey);
+    expect(current.objectKey).not.toBe(stale.objectKey);
+    expect(objects.get(stale.objectKey)).toEqual(preview);
   });
 
 });
