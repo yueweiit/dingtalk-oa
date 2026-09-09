@@ -206,7 +206,7 @@ exports.up = (pgm) => {
       IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'costing_reader') THEN
         GRANT USAGE ON SCHEMA costing_read TO costing_reader;
         GRANT SELECT ON costing_read.approval_instances_v2, costing_read.attachment_archives_v2,
-          costing_read.completed_approval_refresh_v1 TO costing_reader;
+          costing_read.completed_approval_refresh_v1, costing_read.sync_health_v1 TO costing_reader;
       END IF;
     END
     $grant$;

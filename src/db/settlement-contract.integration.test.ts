@@ -64,6 +64,15 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
   });
   afterAll(async () => { await closePool(); await client?.end(); });
 
+  it('allows the read-only costing role to read upstream sync health', async () => {
+    await client.query('SET ROLE costing_reader');
+    try {
+      await expect(client.query('SELECT * FROM costing_read.sync_health_v1 LIMIT 1')).resolves.toBeDefined();
+    } finally {
+      await client.query('RESET ROLE');
+    }
+  });
+
   it('exposes every allowlisted source including deleted tombstones in v2', async () => {
     await insertInstance('log', 'LOG');
     await insertInstance('buy-deleted', 'BUY', [], true);
