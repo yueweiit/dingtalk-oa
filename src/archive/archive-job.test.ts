@@ -12,6 +12,7 @@ const record = {
   fileName: 'packing.xlsx',
   declaredSize: 4,
   objectKey: 'corp/PROC-1/FILE-1',
+  claimGeneration: '1',
   attempts: 0,
 };
 

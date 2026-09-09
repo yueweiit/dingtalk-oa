@@ -12,6 +12,7 @@ const record = {
   fileName: '装箱计划.png',
   declaredSize: 12,
   objectKey: 'corp/PROC-1/FILE-1',
+  claimGeneration: '1',
   attempts: 1,
   thumbnailMediaId: 'MEDIA-1',
 };

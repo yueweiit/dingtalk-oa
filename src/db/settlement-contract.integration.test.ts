@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { archiveAttachment, type PendingArchive } from '../archive/archive-job.js';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
@@ -96,6 +98,43 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
       .toEqual(['buy-cn', 'buy-es', 'buy-split', 'log']);
   });
 
+  it.each([
+    ['commodity plus a misleading explanation field', [
+      { name: '采购支出Gastos de Compra', value: '商品类采购Compra de mercancías' },
+      { name: '采购支出说明', value: '上次使用服务类采购→物流及运输服务，本次为普通物料' },
+    ]],
+    ['an explanation field without any category', [
+      { name: '采购支出说明', value: '服务类采购→物流及运输服务' },
+    ]],
+    ['free text in a recognized parent field', [
+      { name: '采购支出Gastos de Compra', value: '上次使用服务类采购→物流及运输服务，本次为普通物料' },
+    ]],
+    ['free text in the service child field', [
+      { name: '采购支出Gastos de Compra', value: '服务类采购Compra De Servicios' },
+      { name: '服务类采购 Adquisiciones de servicios', value: '上次使用物流及运输服务，本次为咨询' },
+    ]],
+    ['conflicting explicit commodity and service parents', [
+      { name: '采购支出Gastos de Compra', value: '商品类采购Compra de mercancías' },
+      { name: '采购类别', value: '["服务类采购","物流及运输服务"]' },
+    ]],
+  ])('does not archive %s', async (_description, components) => {
+    await insertInstance('not-logistics', 'BUY', components);
+    expect(await listWhitelistedInstances()).toEqual([]);
+  });
+
+  it.each([
+    ['legacy combined path', category('服务类采购→物流及运输服务')],
+    ['bilingual combined path', category('服务类采购Compra De Servicios / 物流及运输服务Servicios de logística y transporte')],
+    ['native structured array', [{ name: '采购类别', value: ['服务类采购', '物流及运输服务'] }]],
+    ['Spanish split fields', [
+      { name: 'Gastos de Compra', value: 'Compra De Servicios' },
+      { name: 'Adquisiciones de servicios', value: 'Servicios de logística y transporte' },
+    ]],
+  ])('retains %s classification', async (_description, components) => {
+    await insertInstance('logistics', 'BUY', components);
+    expect((await listWhitelistedInstances()).map(row => row.process_instance_id)).toEqual(['logistics']);
+  });
+
   it('publishes comment attachments, updates metadata, and retains removed/deleted tombstones', async () => {
     const base = { corp_id: 'corp-1', process_instance_id: 'log', process_code: 'LOG', status: 'COMPLETED' };
     const payload = { status: 'COMPLETED', operationRecords: [{ remark: 'invoice', files: [{ fileId: 'f1', fileName: 'invoice.pdf', fileSize: 10 }] }] };
@@ -163,19 +202,19 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
     await upsertInstance({ ...base, raw_payload: payload(10) });
     const [original] = await claimPendingAttachments(1);
     const archived = { actualSize: 10, etag: 'etag', contentType: 'application/pdf', sha256: 'a'.repeat(64) };
-    await markAttachmentArchived(original.id, archived, original.objectKey);
+    await markAttachmentArchived(original.id, archived, original.objectKey, original.claimGeneration);
     await upsertInstance({ ...base, raw_payload: payload(11) });
     let row = (await client.query('SELECT * FROM costing_read.attachment_archives_v2')).rows[0];
     expect(row.archive_status).toBe('pending');
     expect(row.object_key).not.toBe(original.objectKey);
     expect(row.sha256).toBeNull();
-    await markAttachmentArchived(original.id, archived, original.objectKey);
-    await markAttachmentFailed(original.id, 5, new Error('stale'), original.objectKey);
+    await markAttachmentArchived(original.id, archived, original.objectKey, original.claimGeneration);
+    await markAttachmentFailed(original.id, 5, new Error('stale'), original.objectKey, original.claimGeneration);
     row = (await client.query('SELECT * FROM costing_read.attachment_archives_v2')).rows[0];
     expect(row.archive_status).toBe('pending');
     const [current] = await claimPendingAttachments(1);
     expect(current.declaredSize).toBe(11);
-    await markAttachmentArchived(current.id, { ...archived, actualSize: 11 }, current.objectKey);
+    await markAttachmentArchived(current.id, { ...archived, actualSize: 11 }, current.objectKey, current.claimGeneration);
     expect((await client.query('SELECT * FROM costing_read.attachment_archives_v2')).rows[0].archive_status).toBe('archived');
   });
 
@@ -236,6 +275,100 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
     await client.query("UPDATE ding_approval_instance SET deleted_at=clock_timestamp() WHERE process_instance_id='buy'");
     await retireIneligibleAttachments();
     expect((await client.query('SELECT * FROM costing_read.attachment_archives_v2')).rows[0].retired_at).toBeInstanceOf(Date);
+  });
+
+
+  it.each(['failure', 'success'])('fences stale %s writes after an attachment lease is reclaimed', async (staleOutcome) => {
+    await upsertInstance({ corp_id: 'corp-1', process_instance_id: 'log', process_code: 'LOG', status: 'COMPLETED',
+      raw_payload: { operationRecords: [{ files: [{ fileId: 'fenced', fileSize: 11 }] }] } });
+    const [stale] = await claimPendingAttachments(1);
+    await client.query("UPDATE costing_read.attachment_archive SET claimed_at=now()-interval '16 minutes'");
+    const [current] = await claimPendingAttachments(1);
+    const archived = { actualSize: 11, etag: 'stale-etag', contentType: 'application/pdf', sha256: 'a'.repeat(64) };
+    if (staleOutcome === 'failure') {
+      await markAttachmentFailed(stale.id, 5, new Error('late failure'), stale.objectKey, stale.claimGeneration);
+    } else {
+      await markAttachmentArchived(stale.id, archived, stale.objectKey, stale.claimGeneration);
+    }
+    let row = (await client.query('SELECT * FROM costing_read.attachment_archive')).rows[0];
+    expect(row.archive_status).toBe('archiving');
+    expect(row.etag).toBeNull();
+    expect(current.claimGeneration).not.toEqual(stale.claimGeneration);
+    await markAttachmentArchived(current.id, { ...archived, etag: 'current-etag' }, current.objectKey, current.claimGeneration);
+    row = (await client.query('SELECT * FROM costing_read.attachment_archive')).rows[0];
+    expect(row.archive_status).toBe('archived');
+    expect(row.etag).toBe('current-etag');
+  });
+
+  it.each(['failure', 'success'])('fences stale %s writes when a file descriptor changes back to an earlier value', async (staleOutcome) => {
+    const base = { corp_id: 'corp-1', process_instance_id: 'log', process_code: 'LOG', status: 'COMPLETED' };
+    const payload = (size: number) => ({ operationRecords: [{ files: [{ fileId: 'revision', fileSize: size }] }] });
+    await upsertInstance({ ...base, raw_payload: payload(10) });
+    await upsertInstance({ ...base, raw_payload: payload(11) });
+    const [stale] = await claimPendingAttachments(1);
+    await upsertInstance({ ...base, raw_payload: payload(12) });
+    await upsertInstance({ ...base, raw_payload: payload(11) });
+    const [current] = await claimPendingAttachments(1);
+    const archived = { actualSize: 11, etag: 'stale-etag', contentType: 'application/pdf', sha256: 'a'.repeat(64) };
+    if (staleOutcome === 'failure') {
+      await markAttachmentFailed(stale.id, 5, new Error('late failure'), stale.objectKey, stale.claimGeneration);
+    } else {
+      await markAttachmentArchived(stale.id, archived, stale.objectKey, stale.claimGeneration);
+    }
+    expect((await client.query('SELECT archive_status FROM costing_read.attachment_archive')).rows[0].archive_status).toBe('archiving');
+    expect(current.objectKey).not.toBe(stale.objectKey);
+    await markAttachmentArchived(current.id, { ...archived, etag: 'current-etag' }, current.objectKey, current.claimGeneration);
+    expect((await client.query('SELECT etag FROM costing_read.attachment_archive')).rows[0].etag).toBe('current-etag');
+  });
+
+  it('downloads fresh bytes instead of recovering old HEAD content when a descriptor recurs', async () => {
+    const base = { corp_id: 'corp-1', process_instance_id: 'log', process_code: 'LOG', status: 'COMPLETED' };
+    const payload = (size: number) => ({ operationRecords: [{ files: [{ fileId: 'revision', fileSize: size }] }] });
+    const objects = new Map<string, Buffer>();
+    let downloads = 0;
+    const archive = (record: PendingArchive) => archiveAttachment(record, {
+      headObject: async (key) => {
+        const body = objects.get(key);
+        return body ? { exists: true, size: body.length, etag: 'head-etag', contentType: 'application/pdf',
+          sha256: createHash('sha256').update(body).digest('hex') } : { exists: false };
+      },
+      getDownload: async () => ({ uri: 'https://local.invalid/file', headers: {},
+        archiveMethod: 'workflow_download', contentQuality: 'original', diagnostics: [] }),
+      fetchContent: async () => ({ body: Buffer.alloc(11, ++downloads === 1 ? 'a' : 'b'), contentType: 'application/pdf' }),
+      putObject: async (key, body) => { objects.set(key, body); return { etag: 'download-etag' }; },
+      markArchived: (id, result) => markAttachmentArchived(id, result, record.objectKey, record.claimGeneration),
+      recordApiCall: async () => undefined,
+    });
+    await upsertInstance({ ...base, raw_payload: payload(10) });
+    await upsertInstance({ ...base, raw_payload: payload(11) });
+    const [firstEleven] = await claimPendingAttachments(1);
+    await archive(firstEleven);
+    await upsertInstance({ ...base, raw_payload: payload(12) });
+    await upsertInstance({ ...base, raw_payload: payload(11) });
+    const [secondEleven] = await claimPendingAttachments(1);
+    await archive(secondEleven);
+    expect(downloads).toBe(2);
+    expect(secondEleven.objectKey).not.toBe(firstEleven.objectKey);
+    expect(objects.get(firstEleven.objectKey)).toEqual(Buffer.alloc(11, 'a'));
+    expect(objects.get(secondEleven.objectKey)).toEqual(Buffer.alloc(11, 'b'));
+    const row = (await client.query('SELECT * FROM costing_read.attachment_archive')).rows[0];
+    expect(row.sha256).toBe(createHash('sha256').update(Buffer.alloc(11, 'b')).digest('hex'));
+    const unchangedKey = row.object_key;
+    await upsertInstance({ ...base, raw_payload: payload(11) });
+    expect((await client.query('SELECT object_key FROM costing_read.attachment_archive')).rows[0].object_key).toBe(unchangedKey);
+  });
+
+
+  it('preserves the complete file identity when a file ID itself begins with revision-', async () => {
+    const base = { corp_id: 'corp-1', process_instance_id: 'log', process_code: 'LOG', status: 'COMPLETED' };
+    const payload = (size: number) => ({ operationRecords: [{ files: ['revision-a', 'revision-b'].map(fileId => ({ fileId, fileName: 'invoice.pdf', fileSize: size })) }] });
+    await upsertInstance({ ...base, raw_payload: payload(10) });
+    await upsertInstance({ ...base, raw_payload: payload(11) });
+    const rows = (await client.query('SELECT file_id, object_key FROM costing_read.attachment_archive ORDER BY file_id')).rows;
+    expect(rows).toEqual([
+      { file_id: 'revision-a', object_key: 'corp-1/log/revision-a/revision-1' },
+      { file_id: 'revision-b', object_key: 'corp-1/log/revision-b/revision-1' },
+    ]);
   });
 
 });

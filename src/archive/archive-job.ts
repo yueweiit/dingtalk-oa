@@ -18,6 +18,7 @@ export interface PendingArchive {
   declaredSize: number | null;
   objectKey: string;
   attempts: number;
+  claimGeneration: string;
   thumbnailMediaId?: string;
   recoveryCanary?: boolean;
 }

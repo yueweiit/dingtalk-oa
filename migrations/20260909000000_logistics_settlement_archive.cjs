@@ -1,30 +1,81 @@
 exports.up = (pgm) => {
   pgm.sql(`
-    -- Accept a category path or the known parent/service-child fields, never remarks.
+    -- Match complete category labels and complete path values, never substrings in notes.
     CREATE FUNCTION costing_read.is_logistics_purchase(components jsonb)
-    RETURNS boolean LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $fn$
-      WITH fields AS (
-        SELECT lower(COALESCE(c->>'name', '')) AS name, lower(COALESCE(c->>'value', '')) AS value
-        FROM jsonb_array_elements(
-          CASE WHEN jsonb_typeof(components) = 'array' THEN components ELSE '[]'::jsonb END
-        ) c
-      ), parents AS (
-        SELECT value FROM fields WHERE name ~
-          '(采购类型|采购类别|采购分类|采购支出|gastos de compra|tipo de compra|categoría de compra|categoria de compra)'
-      )
-      SELECT EXISTS (
-        SELECT 1 FROM parents p
-        WHERE p.value ~ '(服务类采购|compra de servicios)'
-          AND p.value !~ '(商品类采购|compra de mercancías|compra de mercancias)'
-          AND (
-            p.value ~ '(物流及运输服务|servicios de logística y transporte|servicios de logistica y transporte)'
-            OR EXISTS (
-              SELECT 1 FROM fields f
-              WHERE f.name ~ '(服务类采购|adquisiciones de servicios|compra de servicios)'
-                AND f.value ~ '(物流及运输服务|servicios de logística y transporte|servicios de logistica y transporte)'
-            )
-          )
-      )
+    RETURNS boolean LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $fn$
+    DECLARE
+      parent_names text[] := ARRAY[
+        '采购类型', '采购类别', '采购分类', '采购支出',
+        'tipodecompra', 'categoríadecompra', 'categoriadecompra', 'gastosdecompra',
+        '采购类型tipodecompra', '采购类别categoríadecompra', '采购类别categoriadecompra',
+        '采购分类categoríadecompra', '采购分类categoriadecompra', '采购支出gastosdecompra'
+      ];
+      child_names text[] := ARRAY[
+        '服务类采购', 'adquisicionesdeservicios', 'compradeservicios',
+        '服务类采购adquisicionesdeservicios', '服务类采购compradeservicios'
+      ];
+      service_values text[] := ARRAY['服务类采购', 'compradeservicios', '服务类采购compradeservicios'];
+      logistics_values text[] := ARRAY[
+        '物流及运输服务', 'serviciosdelogísticaytransporte', 'serviciosdelogisticaytransporte',
+        '物流及运输服务serviciosdelogísticaytransporte', '物流及运输服务serviciosdelogisticaytransporte'
+      ];
+      commodity_values text[] := ARRAY[
+        '商品类采购', '商品采购', 'comprademercancías', 'comprademercancias', 'compradebienes',
+        '商品类采购comprademercancías', '商品类采购comprademercancias', '商品类采购compradebienes'
+      ];
+      component jsonb;
+      field_name text;
+      field_value jsonb;
+      value_text text;
+      path text[];
+      service_parent boolean := false;
+      logistics_child boolean := false;
+      complete_path boolean := false;
+    BEGIN
+      IF jsonb_typeof(components) IS DISTINCT FROM 'array' THEN RETURN false; END IF;
+      FOR component IN SELECT value FROM jsonb_array_elements(components) LOOP
+        field_name := lower(regexp_replace(COALESCE(component->>'name', ''), '[[:space:]]+', '', 'g'));
+        IF NOT (field_name = ANY(parent_names) OR field_name = ANY(child_names)) THEN CONTINUE; END IF;
+        field_value := component->'value';
+        path := NULL;
+        IF jsonb_typeof(field_value) = 'string' THEN
+          value_text := btrim(field_value #>> '{}');
+          IF left(value_text, 1) = '[' THEN
+            BEGIN
+              field_value := value_text::jsonb;
+            EXCEPTION WHEN invalid_text_representation THEN RETURN false;
+            END;
+          ELSE
+            path := regexp_split_to_array(
+              lower(regexp_replace(value_text, '[[:space:]]+', '', 'g')), '(→|->|>|/|／)'
+            );
+          END IF;
+        END IF;
+        IF path IS NULL THEN
+          IF jsonb_typeof(field_value) IS DISTINCT FROM 'array' THEN RETURN false; END IF;
+          IF EXISTS (SELECT 1 FROM jsonb_array_elements(field_value) v WHERE jsonb_typeof(v) <> 'string') THEN
+            RETURN false;
+          END IF;
+          SELECT array_agg(lower(regexp_replace(value, '[[:space:]]+', '', 'g')) ORDER BY ordinal)
+            INTO path FROM jsonb_array_elements_text(field_value) WITH ORDINALITY AS v(value, ordinal);
+        END IF;
+        IF COALESCE(cardinality(path), 0) NOT IN (1, 2) THEN RETURN false; END IF;
+        IF field_name = ANY(parent_names) THEN
+          -- Any explicit commodity parent vetoes conflicting service paths elsewhere.
+          IF path[1] = ANY(commodity_values) THEN RETURN false; END IF;
+          IF NOT (path[1] = ANY(service_values)) THEN RETURN false; END IF;
+          service_parent := true;
+          IF cardinality(path) = 2 THEN
+            IF NOT (path[2] = ANY(logistics_values)) THEN RETURN false; END IF;
+            complete_path := true;
+          END IF;
+        ELSE
+          IF cardinality(path) <> 1 OR NOT (path[1] = ANY(logistics_values)) THEN RETURN false; END IF;
+          logistics_child := true;
+        END IF;
+      END LOOP;
+      RETURN complete_path OR (service_parent AND logistics_child);
+    END
     $fn$;
 
     CREATE VIEW costing_read.approval_instances_v2 AS
@@ -47,7 +98,10 @@ exports.up = (pgm) => {
       ))
     );
 
-    ALTER TABLE costing_read.attachment_archive ADD COLUMN retired_at timestamptz;
+    ALTER TABLE costing_read.attachment_archive
+      ADD COLUMN retired_at timestamptz,
+      ADD COLUMN revision_generation bigint NOT NULL DEFAULT 0,
+      ADD COLUMN claim_generation bigint NOT NULL DEFAULT 0;
 
     -- A successful no-op poll must not masquerade as a changed source record.
     CREATE FUNCTION costing_read.track_approval_source_change()
@@ -95,8 +149,11 @@ exports.up = (pgm) => {
     BEGIN
       IF (NEW.space_id, NEW.file_name, NEW.declared_size, NEW.thumbnail_media_id) IS DISTINCT FROM
          (OLD.space_id, OLD.file_name, OLD.declared_size, OLD.thumbnail_media_id) THEN
-        NEW.object_key := split_part(NEW.object_key, '/revision-', 1) || '/revision-' ||
-          md5(jsonb_build_array(NEW.space_id, NEW.file_name, NEW.declared_size, NEW.thumbnail_media_id)::text);
+        NEW.revision_generation := OLD.revision_generation + 1;
+        -- buildObjectKey encodes each identity as one of the first three segments.
+        NEW.object_key := concat_ws('/', split_part(OLD.object_key, '/', 1),
+          split_part(OLD.object_key, '/', 2), split_part(OLD.object_key, '/', 3)) ||
+          '/revision-' || NEW.revision_generation::text;
         NEW.archive_status := 'pending';
         NEW.attempts := 0;
         NEW.claimed_at := NULL;
@@ -176,7 +233,10 @@ exports.down = (pgm) => {
     DROP VIEW IF EXISTS costing_read.attachment_archives_v2;
     DROP TRIGGER IF EXISTS costing_approval_source_change ON public.ding_approval_instance;
     DROP FUNCTION IF EXISTS costing_read.track_approval_source_change();
-    ALTER TABLE costing_read.attachment_archive DROP COLUMN IF EXISTS retired_at;
+    ALTER TABLE costing_read.attachment_archive
+      DROP COLUMN IF EXISTS retired_at,
+      DROP COLUMN IF EXISTS revision_generation,
+      DROP COLUMN IF EXISTS claim_generation;
     DROP VIEW IF EXISTS costing_read.eligible_attachment_instances;
     DROP VIEW IF EXISTS costing_read.approval_instances_v2;
     DROP FUNCTION IF EXISTS costing_read.is_logistics_purchase(jsonb);

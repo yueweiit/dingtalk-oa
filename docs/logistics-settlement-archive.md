@@ -8,7 +8,7 @@ Apply `migrations/20260909000000_logistics_settlement_archive.cjs` with the exis
 
 The existing `allowed_process_template` rows must use `purpose='international_logistics'` with `archive_attachments=true` for main logistics, and `purpose='purchase_expense'` for purchase expenses. Keep purchase `archive_attachments=false`: purchase eligibility is evaluated per approval category, never by enabling the entire purchase template. No process codes are added automatically. Unknown categories remain visible in the approval contract for downstream review and are not queued for attachment download.
 
-The migration adds two triggers, `retired_at` on the attachment manifest, the completed-refresh ledger, and the views below. It retains v1 column names and types. Existing attachments whose approval is deleted or outside the current attachment scope are marked retired. The next existing `archive:attachments` scan reconciles current attachment lists and discovers eligible historical purchase attachments. Event/backfill/completed-refresh writes thereafter reconcile the source and manifest in one transaction, under a per-instance row lock.
+The migration adds two triggers, `retired_at` plus internal revision/claim generation counters on the attachment manifest, the completed-refresh ledger, and the views below. It retains v1 column names and types. Existing attachments whose approval is deleted or outside the current attachment scope are marked retired. The next existing `archive:attachments` scan reconciles current attachment lists and discovers eligible historical purchase attachments. Event/backfill/completed-refresh writes thereafter reconcile the source and manifest in one transaction, under a per-instance row lock.
 
 If `costing_reader` exists, the migration grants schema usage and SELECT on the three new public views. It grants no base-table access or write privileges. If the role is provisioned later, grant only:
 
@@ -47,7 +47,7 @@ recovery_canary, retired_at
 
 Removal from the source, deletion of its approval, or a category change outside the allowed attachment scope sets `retired_at` and advances `updated_at`. Reappearance clears the retirement marker. A retired row is kept for audit and is excluded from download claims. V1 exposes only currently eligible, unretired attachments; its columns are unchanged.
 
-New or changed attachment metadata, archive progress, and retirement all advance manifest `updated_at`; identical scans do not. A changed file name, size, space, or thumbnail reference creates a versioned object key and requeues downloading. Old worker results cannot replace the newer manifest version. Read `bucket` and `object_key` verbatim; do not derive the key from the file ID. Read MinIO content only after `archive_status='archived'` and `retired_at IS NULL`, and preserve `content_quality` so a preview is not treated as an original. Existing download retry limits, API throttling, and MinIO recovery remain in use. DingTalk file IDs and exposed file descriptors are the available change signals; upstream cannot detect a remote byte mutation that changes neither.
+New or changed attachment metadata, archive progress, and retirement all advance manifest `updated_at`; identical scans do not. A changed file name, size, space, or thumbnail reference advances a durable monotonic revision generation, creates a new object key, and requeues downloading. Returning to an earlier descriptor does not reuse its earlier object key or recover its old bytes through HEAD. Identical descriptors leave the revision unchanged. Every claim, including an expired claim that is reclaimed, separately increments a durable claim generation; both successful and failed manifest writes must match that generation, the object key, and the current archiving state. Old worker results cannot replace a newer claim or manifest revision. Read `bucket` and `object_key` verbatim; do not derive the key from the file ID. Read MinIO content only after `archive_status='archived'` and `retired_at IS NULL`, and preserve `content_quality` so a preview is not treated as an original. Existing download retry limits, API throttling, and MinIO recovery remain in use. DingTalk file IDs and exposed file descriptors are the available change signals; upstream cannot detect a remote byte mutation that changes neither.
 
 Initial consumers must read the complete v2 approval set, not just current/eligible logistics rows. Incremental consumers should independently track approval and attachment updates, retain tombstones, use `(updated_at, corp_id, process_instance_id[, file_id])` for deterministic paging, and replay an overlap interval idempotently. Timestamp fields are not a transactional change-log sequence; an overlapping replay avoids missing a transaction that commits after another reader has observed a newer timestamp. A periodic complete reconciliation provides coverage beyond the overlap interval.
 
@@ -55,14 +55,14 @@ Initial consumers must read the complete v2 approval set, not just current/eligi
 
 ## Eligible purchase paths
 
-The SQL classifier accepts an explicit category path containing both `服务类采购` / `Compra De Servicios` and `物流及运输服务` / `Servicios de logística y transporte` in a named procurement-category field. It also accepts the actual split-field form:
+The SQL classifier matches complete, explicitly recognized procurement field labels and complete structured/path values. After whitespace and case normalization, it accepts an explicit category path containing both `服务类采购` / `Compra De Servicios` and `物流及运输服务` / `Servicios de logística y transporte` in a named procurement-category field. It also accepts the actual split-field form:
 
 ```text
 采购支出Gastos de Compra = 服务类采购Compra De Servicios
 服务类采购 Adquisiciones de servicios = 物流及运输服务Servicios de logística y transporte
 ```
 
-A commodity-purchase parent, missing/unknown category, or matching words in remarks does not qualify. International logistics attachments continue to follow the existing allowlist flag. All unrelated approvals remain available as raw approval rows to the authorized reader, but their attachments are not newly archived by this collector.
+An explicit commodity-purchase parent vetoes conflicting service paths. Missing/unknown category values, category explanation fields, and narrative text that merely mentions the supported labels do not qualify. International logistics attachments continue to follow the existing allowlist flag. All unrelated approvals remain available as raw approval rows to the authorized reader, but their attachments are not newly archived by this collector.
 
 ## Completed approval polling
 
@@ -89,4 +89,4 @@ SETTLEMENT_TEST_DATABASE_URL=postgresql://USER@127.0.0.1:PORT/settlement_test np
 npm run build
 ```
 
-Coverage includes allowlist/tombstones, the actual bilingual split category, commodity/comment exclusions, comment attachment additions/changes/removals, stable no-op timestamps, versioned archive recovery, durable fair rotation after failure/reconnect, existing running rotation, read-only grants, and periodic scheduling overlap protection.
+Coverage includes allowlist/tombstones, the actual bilingual split category, commodity/comment exclusions, comment attachment additions/changes/removals, stable no-op timestamps, nonrepeating archive revisions and old-byte HEAD exclusion, expired-claim success/failure fencing, durable fair rotation after failure/reconnect, existing running rotation, read-only grants, and periodic scheduling overlap protection.

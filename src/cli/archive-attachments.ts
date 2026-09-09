@@ -85,7 +85,7 @@ async function run(): Promise<void> {
           }),
           fetchContent: fetchAttachment,
           putObject: putArchivedObject,
-          markArchived: (id, result) => markAttachmentArchived(id, result, record.objectKey),
+          markArchived: (id, result) => markAttachmentArchived(id, result, record.objectKey, record.claimGeneration),
           // API 客户端记录签名地址请求；这里单独记录文件内容请求。
           recordApiCall: recordApiUsage,
         });
@@ -94,7 +94,7 @@ async function run(): Promise<void> {
         failedCount += 1;
         // A recovery canary has already exhausted every configured strategy once;
         // do not let the normal timer repeat the same quota-consuming chain.
-        await markAttachmentFailed(record.id, record.recoveryCanary ? 5 : record.attempts, error, record.objectKey);
+        await markAttachmentFailed(record.id, record.recoveryCanary ? 5 : record.attempts, error, record.objectKey, record.claimGeneration);
         console.error(`[Archive] ${record.processInstanceId}/${record.fileId} 归档失败:`, error);
       }
       if (index + 1 < pending.length) await delay(config.ARCHIVE_DELAY_MS);

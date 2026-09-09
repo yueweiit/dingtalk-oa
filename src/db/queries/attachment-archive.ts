@@ -74,6 +74,7 @@ export async function claimPendingAttachments(limit: number, recoveryCanariesOnl
        )
        UPDATE costing_read.attachment_archive a
           SET archive_status = 'archiving', attempts = attempts + 1,
+              claim_generation = a.claim_generation + 1,
               claimed_at = now(), updated_at = now()
          FROM picked
         WHERE a.id = picked.id
@@ -97,6 +98,7 @@ function toPendingArchive(row: Record<string, unknown>): PendingArchive {
     declaredSize: row.declared_size === null ? null : Number(row.declared_size),
     objectKey: String(row.object_key),
     attempts: Number(row.attempts),
+    claimGeneration: String(row.claim_generation),
     thumbnailMediaId: String(row.thumbnail_media_id || ''),
     recoveryCanary: Boolean(row.recovery_canary),
   };
@@ -114,6 +116,7 @@ export async function markAttachmentArchived(
     diagnostics?: unknown[];
   },
   objectKey: string,
+  claimGeneration: string,
 ): Promise<void> {
   await withClient((client) => client.query(
     `UPDATE costing_read.attachment_archive
@@ -123,14 +126,17 @@ export async function markAttachmentArchived(
             diagnostic_json=COALESCE($8::jsonb, diagnostic_json),
             failure_code=NULL, last_attempt_strategy=COALESCE($6, last_attempt_strategy),
             archived_at=now(), last_error=NULL, updated_at=now()
-      WHERE id=$1 AND object_key=$9 AND retired_at IS NULL AND archive_status='archiving'`,
+      WHERE id=$1 AND object_key=$9 AND claim_generation=$10
+        AND retired_at IS NULL AND archive_status='archiving'`,
     [id, result.actualSize, result.etag, result.contentType, result.sha256,
       result.archiveMethod || null, result.contentQuality || null,
-      result.diagnostics ? JSON.stringify(result.diagnostics) : null, objectKey],
+      result.diagnostics ? JSON.stringify(result.diagnostics) : null, objectKey, claimGeneration],
   ).then(() => undefined));
 }
 
-export async function markAttachmentFailed(id: number, attempts: number, error: unknown, objectKey: string): Promise<void> {
+export async function markAttachmentFailed(
+  id: number, attempts: number, error: unknown, objectKey: string, claimGeneration: string,
+): Promise<void> {
   const status = failureState(attempts, error);
   const message = error instanceof Error ? error.message : String(error);
   const diagnostics = error instanceof AttachmentDownloadStrategiesError
@@ -146,9 +152,10 @@ export async function markAttachmentFailed(id: number, attempts: number, error: 
     `UPDATE costing_read.attachment_archive
         SET archive_status=$2, last_error=$3, failure_code=$4,
             last_attempt_strategy=$5, diagnostic_json=$6::jsonb, updated_at=now()
-      WHERE id=$1 AND object_key=$7 AND retired_at IS NULL AND archive_status='archiving'`,
+      WHERE id=$1 AND object_key=$7 AND claim_generation=$8
+        AND retired_at IS NULL AND archive_status='archiving'`,
     [id, status, message.slice(0, 4000), failureCode.slice(0, 128),
-      lastDiagnostic?.strategy || null, JSON.stringify(diagnostics), objectKey],
+      lastDiagnostic?.strategy || null, JSON.stringify(diagnostics), objectKey, claimGeneration],
   ).then(() => undefined));
 }
 
