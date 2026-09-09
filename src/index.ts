@@ -11,6 +11,7 @@ import { processApprovalMessage } from './normalize/orchestrator.js';
 import { tokenManager } from './dingtalk/token-manager.js';
 import { syncTemplateNames } from './jobs/sync-template-names.js';
 import { startPackingRefreshWorker, stopPackingRefreshWorker } from './packing/refresh-worker.js';
+import { startApprovalRepairWorker, stopApprovalRepairWorker } from './jobs/approval-repair-worker.js';
 
 async function main() {
   console.log('🚀 钉钉审批数据归档系统启动中...');
@@ -81,6 +82,9 @@ async function main() {
   startPackingRefreshWorker();
   console.log('✅ 装箱工作簿刷新任务启动成功');
 
+  startApprovalRepairWorker();
+  console.log('✅ 审批缺口修复任务启动成功');
+
   // 9. 注册优雅关闭
   let isShuttingDown = false;
   const gracefulShutdown = async (signal: string) => {
@@ -100,6 +104,9 @@ async function main() {
 
       stopPackingRefreshWorker();
       console.log('✅ 装箱工作簿刷新任务已停止');
+
+      stopApprovalRepairWorker();
+      console.log('✅ 审批缺口修复任务已停止');
 
       stopEventOutbox();
 

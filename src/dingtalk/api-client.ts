@@ -253,8 +253,13 @@ export async function searchInstances(params: {
   return parsed.result;
 }
 
-export async function getInstance(processInstanceId: string): Promise<ApprovalInstanceDetail> {
-  const data = await apiCall<unknown>(`/workflow/processInstances?processInstanceId=${processInstanceId}`);
+export async function getInstance(
+  processInstanceId: string,
+  options: { retries?: number } = {},
+): Promise<ApprovalInstanceDetail> {
+  const data = await apiCall<unknown>(`/workflow/processInstances?processInstanceId=${processInstanceId}`, {
+    retries: options.retries,
+  });
 
   const parsed = getInstanceResponseSchema.parse(data);
   return parsed.result;

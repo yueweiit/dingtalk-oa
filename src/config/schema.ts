@@ -61,6 +61,7 @@ export const configSchema = z.object({
   APPROVAL_STATUS_RECONCILE_CRON: z.string().default('*/15 * * * *'),
   APPROVAL_STATUS_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(100),
   APPROVAL_STATUS_RECONCILE_DELAY_MS: z.coerce.number().int().min(0).max(10_000).default(500),
+  APPROVAL_REPAIR_POLL_MS: z.coerce.number().int().min(1000).max(60_000).default(5000),
 
   // 已完成物流/物流采购的评论及附件轮转复查；迁移部署后显式启用。
   COMPLETED_APPROVAL_REFRESH_ENABLED: z.string().default('false').transform((value) => ['1', 'true', 'yes', 'on'].includes(value.toLowerCase())),
