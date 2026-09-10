@@ -65,7 +65,7 @@ export const configSchema = z.object({
 
   // Durable financial history is explicitly seeded, then drained in bounded scheduled batches.
   FINANCIAL_BACKFILL_ENABLED: z.string().default('false').transform(value => ['1','true','yes','on'].includes(value.toLowerCase())),
-  FINANCIAL_BACKFILL_CRON: z.string().default('7-57/10 * * * *'),
+  FINANCIAL_BACKFILL_CRON: z.string().default('7,17,27,37,47,57 * * * *'),
   FINANCIAL_BACKFILL_DELAY_MS: z.coerce.number().int().min(500).max(10000).default(2000),
   FINANCIAL_BACKFILL_MAX_WINDOWS: z.coerce.number().int().min(1).max(20).default(1),
 

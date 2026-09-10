@@ -1,3 +1,4 @@
+import {createRequire} from 'node:module';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { configSchema } from '../config/schema.js';
 
@@ -80,7 +81,7 @@ it('drains durable financial history in bounded nonoverlapping scheduled invocat
 
 it('has a bounded dedicated financial request interval and an offset schedule',()=>{
   const env={PGUSER:'x',PGPASSWORD:'x',PGDATABASE:'x',DINGTALK_APP_KEY:'x',DINGTALK_APP_SECRET:'x'};
-  expect(configSchema.parse(env)).toMatchObject({FINANCIAL_BACKFILL_DELAY_MS:2000,FINANCIAL_BACKFILL_CRON:'7-57/10 * * * *'});
+  expect(configSchema.parse(env)).toMatchObject({FINANCIAL_BACKFILL_DELAY_MS:2000,FINANCIAL_BACKFILL_CRON:'7,17,27,37,47,57 * * * *'});
   expect(configSchema.safeParse({...env,FINANCIAL_BACKFILL_DELAY_MS:499}).success).toBe(false);
   expect(configSchema.safeParse({...env,FINANCIAL_BACKFILL_DELAY_MS:10001}).success).toBe(false);
 });
@@ -91,4 +92,12 @@ it('stops the scheduled financial drain across corporations after a rate limit',
   startScheduler(); await state.schedules.find(row=>row.expression==='*/10 * * * *')!.run();
   expect(state.financial).toHaveBeenCalledTimes(1);
   expect(state.financial).toHaveBeenCalledWith({corpId:'first',maxWindows:1,delayMs:2000});
+});
+
+it('expands the financial default into the intended offset minutes with the installed cron parser',()=>{
+  const env={PGUSER:'x',PGPASSWORD:'x',PGDATABASE:'x',DINGTALK_APP_KEY:'x',DINGTALK_APP_SECRET:'x'};
+  const expression=configSchema.parse(env).FINANCIAL_BACKFILL_CRON;
+  const convert=createRequire(import.meta.url)('node-cron/src/convert-expression/index.js');
+  const minutes=convert(expression).split(' ')[1].split(',').map(Number);
+  expect(minutes).toEqual([7,17,27,37,47,57]);
 });
