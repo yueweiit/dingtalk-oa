@@ -1,3 +1,4 @@
+import { parseArchiveTarget } from '../archive/archive-target.js';
 import { archiveAttachment } from '../archive/archive-job.js';
 import { resolveDingTalkArchiveDownload } from '../archive/dingtalk-download.js';
 import { headArchivedObject, putArchivedObject } from '../archive/minio-archive.js';
@@ -41,6 +42,7 @@ async function fetchAttachment(
 }
 
 async function run(): Promise<void> {
+  const target = parseArchiveTarget(process.argv.slice(2));
   const config = getConfig();
   const startedAt = new Date();
   let scannedCount = 0;
@@ -48,17 +50,26 @@ async function run(): Promise<void> {
   let failedCount = 0;
   await updateArchiveHealth({ startedAt, completed: false, success: false, scannedCount, processedCount });
   try {
-    await retireIneligibleAttachments();
-    const instances = await listWhitelistedInstances();
-    scannedCount = instances.length;
-    for (const instance of instances) {
-      await synchronizeInstanceAttachments(instance.corp_id, instance.process_instance_id);
+    if(target) {
+      await synchronizeInstanceAttachments(target.corpId,target.processInstanceId);
+      scannedCount=1;
+    } else {
+      await retireIneligibleAttachments();
+      const instances = await listWhitelistedInstances();
+      scannedCount = instances.length;
+      for (const instance of instances) {
+        await synchronizeInstanceAttachments(instance.corp_id, instance.process_instance_id);
+      }
     }
 
     const pending = await claimPendingAttachments(
-      config.ARCHIVE_BATCH_SIZE,
+      target ? 1 : config.ARCHIVE_BATCH_SIZE,
       config.ARCHIVE_RECOVERY_CANARY_ONLY,
+      target,
     );
+    if(target && !pending.length) {
+      console.log('[Archive] Exact target was not claimed; inspect whether it is archived, ineligible, leased or awaiting retry.');
+    }
     for (let index = 0; index < pending.length; index += 1) {
       const record = pending[index];
       try {

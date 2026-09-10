@@ -9,11 +9,12 @@ import {registerDiscoveredFinancialTemplate} from './queries/financial-template-
 import * as financialQueries from './queries/financial-backfill.js';
 import { findBackfillTemplates } from './queries/process-template.js';
 import { claimCompletedApprovalRefresh } from './queries/approval-instance.js';
-import { synchronizeInstanceAttachments } from './queries/attachment-archive.js';
+import { claimPendingAttachments, synchronizeInstanceAttachments } from './queries/attachment-archive.js';
 
 const databaseUrl = process.env.FINANCIAL_TEST_DATABASE_URL;
 const migrationsDir = fileURLToPath(new URL('../../migrations', import.meta.url));
 const migrationName = '20260910010000_financial_source_scope';
+const projectionMigration = '20260910020000_financial_source_projection';
 let client: pg.Client;
 const category = [{ name: '服务类采购', value: '物流及运输服务' }];
 const freight = [{ name: '采购分类', value: '商品采购' }, { name: '说明', value: '国际海运费及燃油附加费' }];
@@ -42,7 +43,7 @@ describe.runIf(Boolean(databaseUrl))('broad financial contract (disposable Postg
       '20260703000003_create_ding_user_snapshot', '1788492000000_create_costing_archive',
       '1788492060000_limit_archive_to_logistics', '1788505200000_add_archive_diagnostics',
       '1788508800000_create_costing_actor_names_view', '1788856369000_create_approval_repair_queue',
-      '20260909000000_logistics_settlement_archive', '20260910000000_purchase_template_scope', migrationName]) {
+      '20260909000000_logistics_settlement_archive', '20260910000000_purchase_template_scope', migrationName, projectionMigration]) {
       await runner({ dbClient: client, dir: migrationsDir, file: name, checkOrder: false,
         migrationsTable: 'financial_test_migrations', direction: 'up', log: () => undefined });
     }
@@ -216,11 +217,91 @@ describe.runIf(Boolean(databaseUrl))('broad financial contract (disposable Postg
       {status:'completed',discovered_count:'0',processed_count:'0',pending_instance_count:0}]);
   });
 
+  it('claims only the exact requested attachment without consuming unrelated queued files', async () => {
+    await template('OPS','月结付款'); await approval('other','OPS',freight); await approval('target','OPS',freight);
+    const claimed=await claimPendingAttachments(10,false,{corpId:'corp-1',processInstanceId:'target',fileId:'synthetic-file'});
+    expect(claimed.map(item=>item.processInstanceId)).toEqual(['target']);
+    expect((await client.query("SELECT archive_status FROM costing_read.attachment_archive WHERE process_instance_id='other'")).rows[0].archive_status).toBe('pending');
+    expect(await claimPendingAttachments(10,false,{corpId:'corp-1',processInstanceId:'target',fileId:'missing-file'})).toEqual([]);
+  });
+
+  it('serves source pages, coverage and refresh selection without reparsing archived JSON', async () => {
+    await template('OPS','月结付款'); await approval('monthly','OPS',freight);
+    await financialQueries.enqueueFinancialWindows('corp-1',new Date('2026-01-01T00:00Z'),new Date('2026-02-01T00:00Z'));
+    await client.query('BEGIN');
+    try {
+      for (const signature of ['financial_evidence_text(value jsonb) RETURNS text',
+        'financial_attachment_ids(value jsonb) RETURNS text[]', 'financial_field_items(value jsonb) RETURNS SETOF jsonb']) {
+        await client.query(`CREATE OR REPLACE FUNCTION costing_read.${signature}
+          LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE SET search_path=pg_catalog AS $$ BEGIN
+          RAISE EXCEPTION 'Read path recursively parsed an archived snapshot'; END $$`);
+      }
+      expect((await client.query('SELECT count(*) FROM costing_read.financial_sources_v1')).rows[0].count).toBe('1');
+      expect((await client.query('SELECT * FROM costing_read.financial_sources_v1')).rows[0])
+        .toMatchObject({has_transport_evidence:true,eligible_for_adoption:true,attachment_reference_count:'1'});
+      expect((await client.query('SELECT * FROM costing_read.financial_template_coverage_v1')).rows)
+        .toHaveLength(5);
+      expect((await client.query('SELECT process_instance_id FROM costing_read.completed_refresh_instances')).rows)
+        .toEqual([{process_instance_id:'monthly'}]);
+    } finally { await client.query('ROLLBACK'); }
+  });
+
+  it('keeps evidence watermarks stable when an identical snapshot is refreshed', async () => {
+    await template('OPS','运营支出'); await approval('stable','OPS',freight);
+    const before=(await client.query('SELECT evidence_updated_at FROM costing_read.financial_sources_v1')).rows[0];
+    await approval('stable','OPS',freight);
+    expect((await client.query('SELECT evidence_updated_at FROM costing_read.financial_sources_v1')).rows[0]).toEqual(before);
+  });
+
+  it('resolves related logistics when the initial source and target writes overlap', async () => {
+    await template('ODD','通用申请');
+    const other=new pg.Client({connectionString:databaseUrl}); await other.connect();
+    await client.query('BEGIN');
+    try {
+      await client.query(`INSERT INTO ding_approval_instance(corp_id,process_instance_id,process_code,form_component_values)
+        VALUES('corp-1','concurrent-source','ODD',$1)`,[JSON.stringify([{name:'金额',value:'500'},
+          {name:'关联审批',componentType:'RelateField',value:JSON.stringify(['concurrent-target'])}])]);
+      const insertTarget=other.query(`INSERT INTO ding_approval_instance(corp_id,process_instance_id,process_code)
+        VALUES('corp-1','concurrent-target','LOG')`);
+      // Keep the source uncommitted while the second connection enters its insert.
+      await Promise.race([insertTarget,new Promise(resolve=>setTimeout(resolve,50))]);
+      await client.query('COMMIT'); await insertTarget;
+      expect((await client.query("SELECT has_transport_evidence FROM costing_read.financial_sources_v1 WHERE process_instance_id='concurrent-source'")).rows)
+        .toEqual([{has_transport_evidence:true}]);
+    } finally { await client.query('ROLLBACK'); await other.end(); }
+  });
+
+  it('refreshes references when corporation-specific logistics scope is registered later', async () => {
+    await client.query(`INSERT INTO costing_read.allowed_process_template(process_code,purpose,archive_attachments,auto_registered_purchase)
+      VALUES('SCOPEDLOG','international_logistics',true,true)`);
+    await approval('scoped-target','SCOPEDLOG',[]);
+    await template('ODD','通用申请');
+    await approval('scoped-source','ODD',[{name:'金额',value:'500'},
+      {name:'关联审批',componentType:'RelateField',value:JSON.stringify(['scoped-target'])}]);
+    expect((await client.query('SELECT count(*) FROM costing_read.financial_sources_v1')).rows[0].count).toBe('0');
+    await client.query(`INSERT INTO costing_read.purchase_template_scope(corp_id,process_code) VALUES('corp-1','SCOPEDLOG')`);
+    expect((await client.query('SELECT has_transport_evidence FROM costing_read.financial_sources_v1')).rows)
+      .toEqual([{has_transport_evidence:true}]);
+  });
+
+  it('updates evidence with snapshots and resolves exact related logistics that arrive later', async () => {
+    await template('ODD','通用申请');
+    await approval('linked-late','ODD',[{name:'金额',value:'500'},
+      {name:'关联审批',componentType:'RelateField',value:JSON.stringify(['arrives-later'])}]);
+    expect((await client.query('SELECT count(*) FROM costing_read.financial_sources_v1')).rows[0].count).toBe('0');
+    await approval('arrives-later','LOG',[]);
+    expect((await client.query('SELECT process_instance_id,transport_evidence FROM costing_read.financial_sources_v1')).rows)
+      .toEqual([{process_instance_id:'linked-late',transport_evidence:['logistics_reference']}]);
+    await approval('linked-late','ODD',[{name:'金额',value:'500'},{name:'说明',value:'办公室租金'}]);
+    expect((await client.query('SELECT has_transport_evidence,eligible_for_adoption FROM costing_read.financial_sources_v1')).rows)
+      .toEqual([{has_transport_evidence:false,eligible_for_adoption:false}]);
+  });
+
   it('replays the migration idempotently without touching snapshots or stable exposure timestamps', async () => {
     await template('OPS','运营支出'); await approval('freight','OPS',freight);
     const before = (await client.query('SELECT updated_at,raw_payload FROM costing_read.approval_instances_v2')).rows[0];
     const require = createRequire(import.meta.url);
-    const migration = require(`${migrationsDir}/${migrationName}.cjs`);
+    const migration = require(`${migrationsDir}/${projectionMigration}.cjs`);
     await client.query('BEGIN');
     let sql = ''; migration.up({ sql: (value: string) => { sql += value; } });
     await client.query(sql); await client.query('COMMIT');

@@ -1,6 +1,6 @@
 # Financial source discovery and historical coverage
 
-Apply `20260910010000_financial_source_scope.cjs` after the two settlement migrations described in [the existing archive contract](logistics-settlement-archive.md). It broadens the earlier purchase-only policy. The cost application still reads PostgreSQL and MinIO locally; all DingTalk requests remain in this service. No AI call or document download is performed by discovery/backfill itself.
+Apply `20260910010000_financial_source_scope.cjs` and then `20260910020000_financial_source_projection.cjs` after the two settlement migrations described in [the existing archive contract](logistics-settlement-archive.md). It broadens the earlier purchase-only policy. The cost application still reads PostgreSQL and MinIO locally; all DingTalk requests remain in this service. No AI call or document download is performed by discovery/backfill itself.
 
 ## Scope and evidence
 
@@ -85,3 +85,15 @@ npm run build
 ```
 
 The PostgreSQL suite requires an explicitly supplied disposable loopback database named `settlement_test_financial*`; it truncates synthetic fixture tables. It never calls DingTalk or MinIO. The prior `SETTLEMENT_TEST_DATABASE_URL` suite remains separate because it exercises down/up of the preceding, narrower migration contract.
+
+## Snapshot projection and bounded attachment collection
+
+The projection migration parses local JSON once for existing snapshots and on subsequent snapshot changes. Source pages, counts, completed refresh selection and coverage read the stored evidence and attachment reference count. Exact related logistics IDs are still resolved against current same-corporation scope; late arrivals and later corporation scope registration advance dependent evidence watermarks. Per-instance advisory locks serialize overlapping source/reference writes under the application's READ COMMITTED transactions. Identical snapshots preserve their evidence watermarks. Coverage aggregates source totals once per process before joining its windows. The migration makes no remote calls and preserves existing view columns and grants.
+
+For an already identified monthly statement, collect only one file with all three exact selectors:
+
+```sh
+node dist/cli/archive-attachments.js --corp-id=CORPORATION --instance-id=APPROVAL --file-id=FILE
+```
+
+This mode synchronizes only that approval's local manifest and claims only the specified file. It skips the global scan and global retirement pass. Missing, duplicate, empty or unknown selectors fail before any work. Existing eligibility, active lease, retry backoff, five-attempt limit, generation fencing and original/thumbnail quality checks still apply. A target that cannot be claimed is reported without consuming another queued file. Inspect its archive status and content quality afterward; an exit with zero claims is not evidence of an original archived object. Use `ARCHIVE_RECOVERY_CANARY_ONLY=false` for a normal pending target if the environment is temporarily restricted to recovery canaries.

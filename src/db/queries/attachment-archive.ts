@@ -1,3 +1,4 @@
+import type { ArchiveTarget } from '../../archive/archive-target.js';
 import type pg from 'pg';
 import { withClient, withTransaction } from '../pool.js';
 import { extractAttachmentCandidates, type AttachmentCandidate } from '../../archive/attachment-extractor.js';
@@ -55,7 +56,7 @@ export async function upsertAttachmentCandidates(candidates: AttachmentCandidate
 }
 
 // Each claim writes a distinct object: SQL fencing alone cannot stop a stale PUT.
-export async function claimPendingAttachments(limit: number, recoveryCanariesOnly = false): Promise<PendingArchive[]> {
+export async function claimPendingAttachments(limit: number, recoveryCanariesOnly = false, target?: ArchiveTarget): Promise<PendingArchive[]> {
   return withTransaction(async (client) => {
     const { rows } = await client.query(
       `WITH picked AS (
@@ -69,6 +70,7 @@ export async function claimPendingAttachments(limit: number, recoveryCanariesOnl
             AND retired_at IS NULL
             AND attempts < 5
             AND (NOT $2::boolean OR recovery_canary)
+            AND ($3::text IS NULL OR (corp_id=$3 AND process_instance_id=$4 AND file_id=$5))
           ORDER BY updated_at ASC, id ASC
           FOR UPDATE SKIP LOCKED
           LIMIT $1
@@ -84,7 +86,7 @@ export async function claimPendingAttachments(limit: number, recoveryCanariesOnl
          FROM picked
         WHERE a.id = picked.id
        RETURNING a.*`,
-      [limit, recoveryCanariesOnly],
+      [limit, recoveryCanariesOnly, target?.corpId ?? null, target?.processInstanceId ?? null, target?.fileId ?? null],
     );
     return rows.map(toPendingArchive);
   });
