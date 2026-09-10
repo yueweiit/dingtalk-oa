@@ -4,6 +4,7 @@ import { configSchema } from '../config/schema.js';
 const state = vi.hoisted(() => ({
   enabled: true,
   financialEnabled: false,
+  corpId: 'corp',
   financial: vi.fn(),
   schedules: [] as Array<{ expression: string; run: () => Promise<void> }>,
   refresh: vi.fn(),
@@ -16,7 +17,8 @@ vi.mock('../config/index.js', () => ({ getConfig: () => ({
   FINANCIAL_BACKFILL_ENABLED: state.financialEnabled,
   FINANCIAL_BACKFILL_CRON: '*/10 * * * *',
   FINANCIAL_BACKFILL_MAX_WINDOWS: 1,
-  DINGTALK_CORP_ID: 'corp',
+  FINANCIAL_BACKFILL_DELAY_MS: 2000,
+  DINGTALK_CORP_ID: state.corpId,
   COMPLETED_APPROVAL_REFRESH_ENABLED: state.enabled,
   COMPLETED_APPROVAL_REFRESH_CRON: '*/30 * * * *',
   COMPLETED_APPROVAL_REFRESH_BATCH_SIZE: 10,
@@ -26,10 +28,11 @@ vi.mock('../config/index.js', () => ({ getConfig: () => ({
   APPROVAL_STATUS_RECONCILE_BATCH_SIZE: 100,
 }) }));
 vi.mock('./completed-approval-refresh.js', () => ({ refreshCompletedLogisticsApprovals: state.refresh }));
+vi.mock('../db/queries/corp-config.js',()=>({getAllCorpIds:async()=>[{corp_id:'first'},{corp_id:'second'}]}));
 vi.mock('./financial-backfill.js', () => ({ runFinancialBackfill: state.financial }));
 import { startScheduler, stopScheduler } from './scheduler.js';
 
-afterEach(() => { stopScheduler(); state.schedules.length = 0; state.refresh.mockReset(); state.financial.mockReset(); state.financialEnabled=false; });
+afterEach(() => { stopScheduler(); state.schedules.length = 0; state.refresh.mockReset(); state.financial.mockReset(); state.financialEnabled=false; state.corpId='corp'; });
 
 describe('completed approval refresh scheduling', () => {
   it('has bounded, explicitly enabled configuration', () => {
@@ -71,6 +74,21 @@ it('drains durable financial history in bounded nonoverlapping scheduled invocat
   expect(task).toBeDefined();
   const running=task!.run(); await task!.run();
   expect(state.financial).toHaveBeenCalledTimes(1);
-  expect(state.financial).toHaveBeenCalledWith({corpId:'corp',maxWindows:1});
+  expect(state.financial).toHaveBeenCalledWith({corpId:'corp',maxWindows:1,delayMs:2000});
   release(); await running;
+});
+
+it('has a bounded dedicated financial request interval and an offset schedule',()=>{
+  const env={PGUSER:'x',PGPASSWORD:'x',PGDATABASE:'x',DINGTALK_APP_KEY:'x',DINGTALK_APP_SECRET:'x'};
+  expect(configSchema.parse(env)).toMatchObject({FINANCIAL_BACKFILL_DELAY_MS:2000,FINANCIAL_BACKFILL_CRON:'7-57/10 * * * *'});
+  expect(configSchema.safeParse({...env,FINANCIAL_BACKFILL_DELAY_MS:499}).success).toBe(false);
+  expect(configSchema.safeParse({...env,FINANCIAL_BACKFILL_DELAY_MS:10001}).success).toBe(false);
+});
+
+it('stops the scheduled financial drain across corporations after a rate limit',async()=>{
+  state.financialEnabled=true; state.corpId='';
+  state.financial.mockResolvedValue({windowsCompleted:0,windowsFailed:1,instancesProcessed:0,rateLimited:true});
+  startScheduler(); await state.schedules.find(row=>row.expression==='*/10 * * * *')!.run();
+  expect(state.financial).toHaveBeenCalledTimes(1);
+  expect(state.financial).toHaveBeenCalledWith({corpId:'first',maxWindows:1,delayMs:2000});
 });

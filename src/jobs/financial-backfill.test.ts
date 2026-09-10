@@ -15,7 +15,7 @@ const setup = (row = window()) => {
     nextPage: async () => { state.row.page_loaded=false; },
     complete: async () => { state.completed=true; },
     fail: async () => { state.failed=true; },
-    wait: async () => undefined,
+    wait: async (_ms:number) => undefined,
   };
   return {state,dependencies};
 };
@@ -28,7 +28,7 @@ describe('durable financial backfill', () => {
     const result = await job.runFinancialBackfill({corpId:'corp',delayMs:0},dependencies);
     expect(state.persisted).toEqual(['remaining',...Array.from({length:20},(_,i)=>`page2-${i}`),'last']);
     expect(dependencies.search.mock.calls.map(([query])=>query.nextToken)).toEqual([20,40]);
-    expect(result).toEqual({windowsCompleted:1,windowsFailed:0,instancesProcessed:22});
+    expect(result).toEqual({windowsCompleted:1,windowsFailed:0,instancesProcessed:22,rateLimited:false});
     expect(state.completed).toBe(true);
   });
 
@@ -62,4 +62,45 @@ describe('durable financial backfill', () => {
       .toMatchObject({windowsCompleted:2,windowsFailed:0});
     expect(dependencies.claim).toHaveBeenCalledTimes(2);
   });
+  it('paces every remote request including searches across empty windows', async () => {
+    const {dependencies}=setup(); const events:string[]=[];
+    dependencies.claim=vi.fn(async()=>window());
+    dependencies.wait=async(ms:number)=>{events.push(`wait:${ms}`);};
+    dependencies.search.mockImplementationOnce(async()=>{events.push('search');return {list:['one']};})
+      .mockImplementationOnce(async()=>{events.push('search');return {list:[]};});
+    dependencies.refresh.mockImplementation(async()=>{events.push('refresh');});
+    await job.runFinancialBackfill({corpId:'corp',delayMs:2000,maxWindows:2},dependencies);
+    expect(events).toEqual(['wait:2000','search','wait:2000','refresh','wait:2000','search']);
+  });
+
+  it.each(['API 调用失败: HTTP 403 {"code":"Forbidden.AccessDenied.QpsLimitForApi"}',
+    'API 调用失败: HTTP 429 Too Many Requests'])('stops the drain on rate limiting and leaves the window retryable: %s',async message=>{
+    const {state,dependencies}=setup(); dependencies.claim=vi.fn(async()=>structuredClone(state.row));
+    dependencies.search.mockRejectedValueOnce(new Error(message));
+    const result=await job.runFinancialBackfill({corpId:'corp',delayMs:0,maxWindows:3},dependencies);
+    expect(result).toMatchObject({windowsCompleted:0,windowsFailed:1,rateLimited:true});
+    expect(dependencies.claim).toHaveBeenCalledTimes(1); expect(state.failed).toBe(true);
+    expect(state.row.page_loaded).toBe(false);
+    dependencies.search.mockResolvedValue({list:[]});
+    expect(await job.runFinancialBackfill({corpId:'corp',delayMs:0,maxWindows:1},dependencies))
+      .toMatchObject({windowsCompleted:1,windowsFailed:0,rateLimited:false});
+  });
+
+  it('retains the current detail ID and stops before another window on wrapped QPS errors',async()=>{
+    const {state,dependencies}=setup({...window(),page_loaded:true,pending_ids:['limited','later']});
+    dependencies.claim=vi.fn(async()=>structuredClone(state.row));
+    dependencies.refresh.mockRejectedValue(new Error('getInstance 失败: HTTP 403 Forbidden.AccessDenied.QpsLimitForApi'));
+    expect(await job.runFinancialBackfill({corpId:'corp',delayMs:0,maxWindows:3},dependencies)).toMatchObject({rateLimited:true});
+    expect(dependencies.claim).toHaveBeenCalledTimes(1); expect(state.row.pending_ids).toEqual(['limited','later']);
+    expect(state.persisted).toEqual([]);
+  });
+
+  it('keeps ordinary access failures distinct from QPS limiting',async()=>{
+    const {dependencies}=setup(); dependencies.claim=vi.fn(async()=>window());
+    dependencies.search.mockRejectedValueOnce(new Error('HTTP 403 Forbidden.AccessDenied.PermissionDenied')).mockResolvedValue({list:[]});
+    expect(await job.runFinancialBackfill({corpId:'corp',delayMs:0,maxWindows:2},dependencies))
+      .toMatchObject({windowsCompleted:1,windowsFailed:1,rateLimited:false});
+    expect(dependencies.claim).toHaveBeenCalledTimes(2);
+  });
+
 });

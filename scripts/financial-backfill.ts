@@ -18,7 +18,7 @@ async function main() {
   --start=YYYY-MM-DD   Inclusive Asia/Shanghai start (default 2026-01-01)
   --end=YYYY-MM-DD     Exclusive Asia/Shanghai end (default start of today, capped at 2027-01-01)
   --max-windows=N      Optional invocation budget; no overall record or window cap
-  --delay-ms=N         Delay per approval (default 500; minimum 500)
+  --delay-ms=N         Delay before every search/detail request (env default 2000; minimum 500)
   --discover-only     Discover/register templates and seed windows, without fetching instances
   --resume-only       Skip discovery and scheduling; resume existing durable windows
   --no-current        Skip current template list; still resolve retained/historical names
@@ -40,7 +40,7 @@ This command downloads no documents and calls no AI. The existing eligible attac
     console.log(JSON.stringify(status,null,2)); return;
   }
   const maxWindows=arg('max-windows')===undefined?undefined:Number(arg('max-windows'));
-  const delayMs=Number(arg('delay-ms')??500);
+  const delayMs=Number(arg('delay-ms')??config.FINANCIAL_BACKFILL_DELAY_MS);
   if(!Number.isInteger(delayMs)||delayMs<500||delayMs>10000) throw new Error('delay-ms must be 500–10000');
   if(maxWindows!==undefined&&(!Number.isInteger(maxWindows)||maxWindows<1)) throw new Error('max-windows must be a positive integer');
   let discoveryFailed=0;

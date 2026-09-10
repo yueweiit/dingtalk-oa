@@ -88,8 +88,9 @@ export function startScheduler(): void {
       try {
         const corps = config.DINGTALK_CORP_ID ? [config.DINGTALK_CORP_ID] : (await getAllCorpIds()).map(c => c.corp_id);
         for (const corpId of corps) {
-          const result = await runFinancialBackfill({corpId,maxWindows:config.FINANCIAL_BACKFILL_MAX_WINDOWS});
+          const result = await runFinancialBackfill({corpId,maxWindows:config.FINANCIAL_BACKFILL_MAX_WINDOWS,delayMs:config.FINANCIAL_BACKFILL_DELAY_MS});
           console.log('[Scheduler] 财务历史归档:', result);
+          if (result?.rateLimited) break;
         }
       } catch (error) {
         console.error('[Scheduler] 财务历史归档失败:', error);

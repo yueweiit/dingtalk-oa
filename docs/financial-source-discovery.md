@@ -65,9 +65,12 @@ Omit `--max-windows` to drain all ready windows. There is no total record/page/w
 
 ```dotenv
 FINANCIAL_BACKFILL_ENABLED=true
-FINANCIAL_BACKFILL_CRON=*/10 * * * *
+FINANCIAL_BACKFILL_CRON=7-57/10 * * * *
+FINANCIAL_BACKFILL_DELAY_MS=2000
 FINANCIAL_BACKFILL_MAX_WINDOWS=1
 ```
+
+The financial worker waits `FINANCIAL_BACKFILL_DELAY_MS` before every list and detail request, including empty historical windows; the CLI uses the same setting unless `--delay-ms` overrides it. The suggested minute 7/17/27/37/47/57 schedule avoids the usual minute 0/15/30/45 status/refresh starts. This is a conservative per-worker interval, not a guarantee against quotas shared with other processes. The common API client retains its existing behavior. If a search or detail response contains `Forbidden.AccessDenied.QpsLimitForApi` (including wrapped HTTP 403 errors), or HTTP 429, the worker records the failed window and immediately ends the drain with `rateLimited:true`; it does not claim other windows or corporations in that invocation. The CLI exits nonzero and the scheduler waits for its next tick. Do not immediately relaunch a rate-limited CLI or run it alongside the scheduled financial worker.
 
 The scheduler limits work per invocation and suppresses in-process overlap. PostgreSQL row claims protect against other workers. Fifteen-minute leases expire after crashes; each progress update renews the lease, and generation fencing prevents a stale worker from advancing a reclaimed window. A page is saved before its first detail fetch, and an ID is removed only after its source snapshot/manifest transaction succeeds. Failures leave the current ID pending and mark the window failed. Failed windows become retryable after a minute, but are not immediately retried again in the same invocation. A persisted source may be replayed after a crash between persistence and checkpointing; its upsert is idempotent. Nonadvancing/empty continuation pages fail visibly rather than looping or claiming coverage.
 
