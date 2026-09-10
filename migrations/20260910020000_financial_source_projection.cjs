@@ -107,7 +107,8 @@ exports.up = (pgm) => {
     RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $fn$
     DECLARE instance record;
     BEGIN
-      FOR instance IN SELECT corp_id,process_instance_id FROM public.ding_approval_instance WHERE process_code=NEW.process_code LOOP
+      FOR instance IN SELECT corp_id,process_instance_id FROM public.ding_approval_instance WHERE process_code=NEW.process_code ORDER BY corp_id,process_instance_id LOOP
+        PERFORM pg_advisory_xact_lock(hashtext(instance.corp_id),hashtext(instance.process_instance_id));
         PERFORM costing_read.refresh_financial_reference_dependents(instance.corp_id,instance.process_instance_id);
       END LOOP;
       RETURN NEW;

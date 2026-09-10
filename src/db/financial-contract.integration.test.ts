@@ -271,6 +271,23 @@ describe.runIf(Boolean(databaseUrl))('broad financial contract (disposable Postg
     } finally { await client.query('ROLLBACK'); await other.end(); }
   });
 
+  it('resolves financial insertion overlapping corporation scope registration', async () => {
+    await client.query(`INSERT INTO costing_read.allowed_process_template(process_code,purpose,archive_attachments,auto_registered_purchase)
+      VALUES('CONCURRENTLOG','international_logistics',true,true)`);
+    await approval('scope-target','CONCURRENTLOG',[]); await template('ODD','通用申请');
+    const other=new pg.Client({connectionString:databaseUrl}); await other.connect(); await client.query('BEGIN');
+    try {
+      await client.query(`INSERT INTO ding_approval_instance(corp_id,process_instance_id,process_code,form_component_values)
+        VALUES('corp-1','scope-source','ODD',$1)`,[JSON.stringify([{name:'金额',value:'500'},
+          {name:'关联审批',componentType:'RelateField',value:JSON.stringify(['scope-target'])}])]);
+      const register=other.query(`INSERT INTO costing_read.purchase_template_scope(corp_id,process_code) VALUES('corp-1','CONCURRENTLOG')`);
+      await Promise.race([register,new Promise(resolve=>setTimeout(resolve,50))]);
+      await client.query('COMMIT'); await register;
+      expect((await client.query("SELECT has_transport_evidence FROM costing_read.financial_sources_v1 WHERE process_instance_id='scope-source'")).rows)
+        .toEqual([{has_transport_evidence:true}]);
+    } finally { await client.query('ROLLBACK'); await other.end(); }
+  });
+
   it('refreshes references when corporation-specific logistics scope is registered later', async () => {
     await client.query(`INSERT INTO costing_read.allowed_process_template(process_code,purpose,archive_attachments,auto_registered_purchase)
       VALUES('SCOPEDLOG','international_logistics',true,true)`);
