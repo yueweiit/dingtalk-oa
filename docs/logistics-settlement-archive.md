@@ -1,5 +1,7 @@
 # Logistics settlement archive contract
 
+The subsequent [financial source discovery migration](financial-source-discovery.md) broadens the purchase-only source and attachment eligibility described below while preserving the v2 schemas. Apply that migration after the two migrations documented here for all financial templates and resumable 2026 coverage.
+
 The cost system reads PostgreSQL and MinIO only. DingTalk requests remain in this upstream service. This change adds no cost-system write endpoint, no DingTalk write operation, and no new MinIO credential.
 
 ## Database rollout

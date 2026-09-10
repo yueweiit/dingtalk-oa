@@ -3,6 +3,8 @@ import { configSchema } from '../config/schema.js';
 
 const state = vi.hoisted(() => ({
   enabled: true,
+  financialEnabled: false,
+  financial: vi.fn(),
   schedules: [] as Array<{ expression: string; run: () => Promise<void> }>,
   refresh: vi.fn(),
 }));
@@ -11,6 +13,10 @@ vi.mock('node-cron', () => ({ default: { schedule: (expression: string, run: () 
   return { stop: vi.fn() };
 } } }));
 vi.mock('../config/index.js', () => ({ getConfig: () => ({
+  FINANCIAL_BACKFILL_ENABLED: state.financialEnabled,
+  FINANCIAL_BACKFILL_CRON: '*/10 * * * *',
+  FINANCIAL_BACKFILL_MAX_WINDOWS: 1,
+  DINGTALK_CORP_ID: 'corp',
   COMPLETED_APPROVAL_REFRESH_ENABLED: state.enabled,
   COMPLETED_APPROVAL_REFRESH_CRON: '*/30 * * * *',
   COMPLETED_APPROVAL_REFRESH_BATCH_SIZE: 10,
@@ -20,9 +26,10 @@ vi.mock('../config/index.js', () => ({ getConfig: () => ({
   APPROVAL_STATUS_RECONCILE_BATCH_SIZE: 100,
 }) }));
 vi.mock('./completed-approval-refresh.js', () => ({ refreshCompletedLogisticsApprovals: state.refresh }));
+vi.mock('./financial-backfill.js', () => ({ runFinancialBackfill: state.financial }));
 import { startScheduler, stopScheduler } from './scheduler.js';
 
-afterEach(() => { stopScheduler(); state.schedules.length = 0; state.refresh.mockReset(); });
+afterEach(() => { stopScheduler(); state.schedules.length = 0; state.refresh.mockReset(); state.financial.mockReset(); state.financialEnabled=false; });
 
 describe('completed approval refresh scheduling', () => {
   it('has bounded, explicitly enabled configuration', () => {
@@ -53,4 +60,17 @@ describe('completed approval refresh scheduling', () => {
     startScheduler();
     expect(state.schedules.some(row => row.expression === '*/30 * * * *')).toBe(false);
   });
+});
+
+it('drains durable financial history in bounded nonoverlapping scheduled invocations', async () => {
+  state.financialEnabled=true;
+  let release!:()=>void;
+  state.financial.mockImplementation(()=>new Promise<void>(resolve=>{release=resolve;}));
+  startScheduler();
+  const task=state.schedules.find(row=>row.expression==='*/10 * * * *');
+  expect(task).toBeDefined();
+  const running=task!.run(); await task!.run();
+  expect(state.financial).toHaveBeenCalledTimes(1);
+  expect(state.financial).toHaveBeenCalledWith({corpId:'corp',maxWindows:1});
+  release(); await running;
 });

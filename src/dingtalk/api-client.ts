@@ -229,6 +229,19 @@ export async function listProcessTemplates(userId: string): Promise<ProcessTempl
   }));
 }
 
+/** Current template lists omit historical forms; exact name lookup can recover their code. */
+export async function getProcessCodeByName(name: string): Promise<string> {
+  if (!name.trim()) throw new Error('Template name is required');
+  const data = await apiCall<Record<string, unknown>>(
+    `/workflow/processCentres/schemaNames/processCodes?name=${encodeURIComponent(name)}`,
+    { validate: data => {
+      const code = resultObject(data).processCode;
+      if (typeof code !== 'string' || !code.trim()) throw new Error('Template lookup response has no processCode');
+    } },
+  );
+  return String(resultObject(data).processCode);
+}
+
 export async function searchInstances(params: {
   processCode: string;
   startTime: Date;

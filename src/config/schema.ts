@@ -63,6 +63,11 @@ export const configSchema = z.object({
   APPROVAL_STATUS_RECONCILE_DELAY_MS: z.coerce.number().int().min(0).max(10_000).default(500),
   APPROVAL_REPAIR_POLL_MS: z.coerce.number().int().min(1000).max(60_000).default(5000),
 
+  // Durable financial history is explicitly seeded, then drained in bounded scheduled batches.
+  FINANCIAL_BACKFILL_ENABLED: z.string().default('false').transform(value => ['1','true','yes','on'].includes(value.toLowerCase())),
+  FINANCIAL_BACKFILL_CRON: z.string().default('*/10 * * * *'),
+  FINANCIAL_BACKFILL_MAX_WINDOWS: z.coerce.number().int().min(1).max(20).default(1),
+
   // 已完成物流/物流采购的评论及附件轮转复查；迁移部署后显式启用。
   COMPLETED_APPROVAL_REFRESH_ENABLED: z.string().default('false').transform((value) => ['1', 'true', 'yes', 'on'].includes(value.toLowerCase())),
   COMPLETED_APPROVAL_REFRESH_CRON: z.string().default('*/30 * * * *'),
