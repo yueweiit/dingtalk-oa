@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { archiveAttachment, type ArchiveDependencies, type PendingArchive } from '../archive/archive-job.js';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { runner } from 'node-pg-migrate';
@@ -13,8 +13,11 @@ import { upsertInstance, markAsDeleted } from './queries/approval-instance.js';
 // Only run against an explicitly supplied disposable local database.
 const databaseUrl = process.env.SETTLEMENT_TEST_DATABASE_URL;
 const migrationName = '20260909000000_logistics_settlement_archive';
+const scopeMigrationName = '20260910000000_purchase_template_scope';
 const migrationsDir = fileURLToPath(new URL('../../migrations', import.meta.url));
 const hasMigration = existsSync(`${migrationsDir}/${migrationName}.cjs`);
+const hasScopeMigration = existsSync(`${migrationsDir}/${scopeMigrationName}.cjs`);
+const categoryCases: Array<{description: string; components: unknown; expected: boolean}> = JSON.parse(readFileSync(new URL('./fixtures/purchase-category-cases.json', import.meta.url), 'utf8'));
 const category = (value: unknown, name = '采购类别') => [{ name, value: typeof value === 'string' ? value : JSON.stringify(value) }];
 let client: pg.Client;
 
@@ -41,28 +44,142 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
     await client.query(`DO $role$ BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='costing_reader') THEN CREATE ROLE costing_reader; END IF;
     END $role$`);
+    if ((await client.query("SELECT to_regclass('costing_read.allowed_process_template') AS relation")).rows[0].relation) {
+      await client.query('TRUNCATE costing_read.allowed_process_template CASCADE');
+    }
     if (hasMigration && (await client.query("SELECT to_regclass('settlement_test_migrations') AS relation")).rows[0].relation) {
+      if (hasScopeMigration && (await client.query("SELECT 1 FROM settlement_test_migrations WHERE name=$1", [scopeMigrationName])).rowCount) {
+        await runner({ dbClient: client, dir: migrationsDir, file: scopeMigrationName, checkOrder: false,
+          migrationsTable: 'settlement_test_migrations', direction: 'down', log: () => undefined });
+      }
       await runner({ dbClient: client, dir: migrationsDir, file: migrationName, checkOrder: false,
         migrationsTable: 'settlement_test_migrations', direction: 'down', log: () => undefined });
     }
     for (const file of [
+      '20260703000000_create_ding_process_template',
       '20260703000001_create_ding_approval_instance',
+      '20260703000003_create_ding_user_snapshot',
       '1788492000000_create_costing_archive',
       '1788492060000_limit_archive_to_logistics',
       '1788505200000_add_archive_diagnostics',
+      '1788508800000_create_costing_actor_names_view',
+      '1788856369000_create_approval_repair_queue',
       ...(hasMigration ? [migrationName] : []),
+      ...(hasScopeMigration ? [scopeMigrationName] : []),
     ]) {
       await runner({ dbClient: client, dir: migrationsDir, file, checkOrder: false,
         migrationsTable: 'settlement_test_migrations', direction: 'up', log: () => undefined });
     }
   });
   beforeEach(async () => {
-    await client.query('TRUNCATE ding_approval_instance, costing_read.allowed_process_template, costing_read.attachment_archive RESTART IDENTITY CASCADE');
+    await client.query('TRUNCATE ding_user_snapshot, ding_process_template, ding_approval_instance, costing_read.allowed_process_template, costing_read.attachment_archive RESTART IDENTITY CASCADE');
     if (hasMigration) await client.query('TRUNCATE costing_read.completed_approval_refresh');
+    if (hasScopeMigration) await client.query('TRUNCATE costing_read.purchase_template_scope, costing_read.purchase_approval_exposure');
     await client.query(`INSERT INTO costing_read.allowed_process_template(process_code,purpose,archive_attachments)
       VALUES ('LOG','international_logistics',true),('BUY','purchase_expense',false),('OTHER','other',false)`);
   });
   afterAll(async () => { await closePool(); await client?.end(); });
+
+
+  it.each(categoryCases)('classifies the approved category contract: $description', async (testCase) => {
+    const result = await client.query('SELECT costing_read.is_logistics_purchase($1::jsonb) AS eligible',
+      [JSON.stringify(testCase.components)]);
+    expect(result.rows[0].eligible).toBe(testCase.expected);
+  });
+
+  it('registers existing and future named templates, preserving historical scope and tenant boundaries', async () => {
+    await client.query(`INSERT INTO ding_process_template(corp_id,process_code,name,enabled,is_deleted) VALUES
+      ('corp-1','LATIN','拉丁购采购支出',true,false), ('corp-1','LEMOS','LEMOS采购支出',false,true),
+      ('corp-1','RENAMED','普通审批',true,false), ('corp-2','LATIN','普通审批',true,false),
+      ('corp-1','UNRELATED','采购申请',true,false), ('corp-1','LOG','国际物流采购支出',true,false)`);
+    await insertInstance('latin','LATIN');
+    await insertInstance('lemos-deleted','LEMOS',[],true);
+    await insertInstance('renamed','RENAMED');
+    await insertInstance('unrelated-template','UNRELATED');
+    await client.query(`INSERT INTO ding_approval_instance(corp_id,process_instance_id,process_code,raw_payload)
+      VALUES ('corp-2','private-tenant','LATIN','{}')`);
+    await client.query("UPDATE ding_process_template SET name='凌翔星铭采购支出' WHERE process_code='RENAMED'");
+    await client.query("UPDATE ding_process_template SET name='历史审批',enabled=false,is_deleted=true WHERE process_code='LATIN'");
+    await client.query("DELETE FROM ding_process_template WHERE process_code='LEMOS'");
+    const rows = (await client.query('SELECT process_instance_id FROM costing_read.approval_instances_v2 ORDER BY 1')).rows;
+    expect(rows.map(row => row.process_instance_id)).toEqual(['latin','lemos-deleted','renamed']);
+    expect((await client.query('SELECT process_instance_id FROM costing_read.approval_instances_v1 ORDER BY 1')).rows.map(row => row.process_instance_id))
+      .toEqual(['latin','renamed']);
+    expect((await client.query("SELECT purpose,archive_attachments FROM costing_read.allowed_process_template WHERE process_code='LOG'")).rows[0])
+      .toEqual({purpose:'international_logistics',archive_attachments:true});
+    expect((await client.query("SELECT archive_attachments FROM costing_read.allowed_process_template WHERE process_code='LATIN'")).rows[0])
+      .toEqual({archive_attachments:false});
+  });
+
+  it('keeps newly registered purchase downloads restricted by exact category and individual validity', async () => {
+    await client.query("INSERT INTO ding_process_template(corp_id,process_code,name) VALUES ('corp-1','NEW','新公司采购支出')");
+    const child = [{name:'服务类采购 Adquisiciones de servicios',value:'物流及运输服务Servicios de logística y transporte'}];
+    for (const id of ['eligible','rejected','withdrawn','deleted','unrelated']) {
+      await insertInstance(id,'NEW',id === 'unrelated' ? [{name:'备注',value:'物流及运输服务'}] : child, id === 'deleted');
+    }
+    await client.query("UPDATE ding_approval_instance SET result='refuse' WHERE process_instance_id='rejected'");
+    await client.query("UPDATE ding_approval_instance SET status='TERMINATED' WHERE process_instance_id='withdrawn'");
+    expect((await listWhitelistedInstances()).map(row => row.process_instance_id)).toEqual(['eligible']);
+    expect((await client.query('SELECT * FROM costing_read.approval_instances_v2')).rows).toHaveLength(5);
+  });
+
+
+  it('upgrades historical metadata and only wakes newly exposed or newly classified approvals', async () => {
+    const migrateScope = (direction: 'up' | 'down') => runner({ dbClient: client, dir: migrationsDir,
+      file: scopeMigrationName, checkOrder: false, migrationsTable: 'settlement_test_migrations', direction, log: () => undefined });
+    await migrateScope('down');
+    const oldFields = category(['服务类采购','物流及运输服务']);
+    const newFields = [{name:'采购支出Gastos de Compra',value:'服务商采购Compra de proveedores'},
+      {name:'服务类采购 Adquisiciones de servicios',value:'物流及运输服务Servicios de logística y transporte'}];
+    for (const [id, code, fields] of [['old-eligible','BUY',oldFields], ['alias-eligible','BUY',newFields],
+      ['historical-scope','HISTORY',newFields], ['unrelated','BUY',[]]] as const) {
+      await client.query(`INSERT INTO ding_approval_instance(corp_id,process_instance_id,process_code,form_component_values,raw_payload,updated_at)
+        VALUES ('corp-1',$1,$2,$3,'{}','2025-01-01T00:00:00Z')`,[id,code,JSON.stringify(fields)]);
+    }
+    await client.query("INSERT INTO ding_process_template(corp_id,process_code,name,enabled,is_deleted) VALUES ('corp-1','HISTORY','LEMOS采购支出',false,true)");
+    const before = (await client.query("SELECT process_instance_id,updated_at,md5(raw_payload::text || form_component_values::text) AS revision FROM costing_read.approval_instances_v2 ORDER BY 1")).rows;
+    const boundary = (await client.query('SELECT clock_timestamp() AS boundary')).rows[0].boundary;
+    await migrateScope('up');
+    const changed = (await client.query('SELECT process_instance_id FROM costing_read.approval_instances_v2 WHERE updated_at >= $1 ORDER BY 1',[boundary])).rows;
+    expect(changed.map(row => row.process_instance_id)).toEqual(['alias-eligible','historical-scope']);
+    const after = (await client.query("SELECT process_instance_id,updated_at,md5(raw_payload::text || form_component_values::text) AS revision FROM costing_read.approval_instances_v2 ORDER BY 1")).rows;
+    expect(after.find(row => row.process_instance_id === 'old-eligible')).toEqual(before.find(row => row.process_instance_id === 'old-eligible'));
+    expect((await client.query("SELECT DISTINCT updated_at FROM ding_approval_instance")).rows)
+      .toEqual([{updated_at:new Date('2025-01-01T00:00:00Z')}]);
+    const firstScope = after.find(row => row.process_instance_id === 'historical-scope').updated_at;
+    await client.query("UPDATE ding_process_template SET name='LEMOS采购支出（新版）' WHERE process_code='HISTORY'");
+    expect((await client.query("SELECT updated_at FROM costing_read.approval_instances_v2 WHERE process_instance_id='historical-scope'")).rows[0].updated_at).toEqual(firstScope);
+    await migrateScope('down');
+    expect((await client.query("SELECT process_code FROM costing_read.allowed_process_template ORDER BY 1")).rows.map(row => row.process_code)).toEqual(['BUY','LOG','OTHER']);
+    expect((await client.query('SELECT * FROM ding_approval_instance')).rows).toHaveLength(4);
+    expect((await client.query('SELECT costing_read.is_logistics_purchase($1::jsonb) AS eligible',[JSON.stringify(newFields)])).rows[0].eligible).toBe(false);
+    await migrateScope('up');
+  });
+
+  it('does not expose other-tenant actor names or allow repairs via an automatically added global process code', async () => {
+    await client.query(`INSERT INTO ding_process_template(corp_id,process_code,name) VALUES
+      ('corp-1','SCOPED','采购支出'),('corp-2','SCOPED','普通审批')`);
+    await client.query(`INSERT INTO ding_approval_instance(corp_id,process_instance_id,process_code,originator_user_id,raw_payload)
+      VALUES ('corp-1','ours','SCOPED','u1','{}'),('corp-2','theirs','SCOPED','u2','{}')`);
+    await client.query(`INSERT INTO ding_user_snapshot(corp_id,user_id,name,fetch_status,snapshot_hash)
+      VALUES ('corp-1','u1','Ours','success','hash-1'),('corp-2','u2','Theirs','success','hash-2')`);
+    expect.soft((await client.query('SELECT name FROM costing_read.approval_actor_names_v1 ORDER BY name')).rows).toEqual([{name:'Ours'}]);
+    await expect(client.query(`SELECT costing_read.request_approval_repair('corp-2','theirs','business-2','SCOPED','purchase_expense',$1,'test')`,['b'.repeat(64)]))
+      .rejects.toMatchObject({code:'42501'});
+    await expect(client.query(`SELECT costing_read.request_approval_repair('corp-1','ours','business-1','SCOPED','purchase_expense',$1,'test')`,['a'.repeat(64)]))
+      .resolves.toBeDefined();
+    // Repair evidence prevents destructive removal of its auto-registered parent during rollback.
+    await expect(runner({dbClient:client,dir:migrationsDir,file:scopeMigrationName,checkOrder:false,
+      migrationsTable:'settlement_test_migrations',direction:'down',log:()=>undefined}))
+      .rejects.toMatchObject({code:'23503'});
+    await client.query('ROLLBACK'); // runner with an externally supplied client leaves rollback to its caller.
+    expect((await client.query("SELECT auto_registered_purchase FROM costing_read.allowed_process_template WHERE process_code='SCOPED'")).rows[0].auto_registered_purchase).toBe(true);
+    await client.query('SET ROLE costing_reader');
+    try {
+      await expect(client.query('SELECT * FROM costing_read.purchase_template_scope')).rejects.toMatchObject({code:'42501'});
+      await expect(client.query('SELECT costing_read.register_purchase_template()')).rejects.toMatchObject({code:'42501'});
+    } finally { await client.query('RESET ROLE'); }
+  });
 
   it('allows the read-only costing role to read upstream sync health', async () => {
     await client.query('SET ROLE costing_reader');
@@ -104,7 +221,7 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
     await insertInstance('comment-mention', 'BUY', category('服务类采购→物流及运输服务', '备注'));
     await insertInstance('unknown', 'BUY', category('待确认'));
     expect((await listWhitelistedInstances()).map(row => row.process_instance_id).sort())
-      .toEqual(['buy-cn', 'buy-es', 'buy-split', 'log']);
+      .toEqual(['buy-cn', 'buy-es', 'buy-split', 'commodity-split', 'log']);
   });
 
   it.each([
