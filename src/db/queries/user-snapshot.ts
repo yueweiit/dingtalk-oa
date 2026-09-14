@@ -1,4 +1,4 @@
-import { withClient } from '../pool.js';
+import { withClient, withTransaction } from '../pool.js';
 import type { DingUserSnapshot } from '../types.js';
 import type pg from 'pg';
 
@@ -140,16 +140,50 @@ export async function recordFetchFailure(params: {
   fetch_status: string;
   fetch_error: string;
 }): Promise<void> {
-  await withClient(async (client) => {
-    // 关闭可能存在的当前快照
+  await withTransaction(async (client) => {
+    // 同一用户的失败处理串行化，避免并发重试同时插入多条当前失败记录。
     await client.query(
-      `UPDATE ding_user_snapshot
-       SET valid_to = now(), is_current = false, updated_at = now()
-       WHERE corp_id = $1 AND user_id = $2 AND is_current = true`,
+      'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
       [params.corp_id, params.user_id]
     );
 
-    // 插入失败记录
+    const { rows } = await client.query<{
+      id: number;
+      fetch_status: string | null;
+      fetch_error: string | null;
+    }>(
+      `SELECT id, fetch_status, fetch_error
+         FROM ding_user_snapshot
+        WHERE corp_id = $1 AND user_id = $2 AND is_current = true
+        LIMIT 1
+        FOR UPDATE`,
+      [params.corp_id, params.user_id]
+    );
+    const current = rows[0];
+
+    // 相同用户、相同失败状态和错误只更新原记录，不重复插入快照。
+    if (
+      current &&
+      current.fetch_status === params.fetch_status &&
+      current.fetch_error === params.fetch_error
+    ) {
+      await client.query(
+        'UPDATE ding_user_snapshot SET updated_at = now() WHERE id = $1',
+        [current.id]
+      );
+      return;
+    }
+
+    // 错误变化，或当前是成功快照时，保留历史并生成新的失败快照。
+    if (current) {
+      await client.query(
+        `UPDATE ding_user_snapshot
+         SET valid_to = now(), is_current = false, updated_at = now()
+         WHERE id = $1`,
+        [current.id]
+      );
+    }
+
     await client.query(
       `INSERT INTO ding_user_snapshot (
         corp_id, user_id, name, snapshot_hash, fetch_status, fetch_error, is_current
