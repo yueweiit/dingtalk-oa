@@ -8,6 +8,21 @@ const userCache = new Map<string, { data: UserInfo; expiresAt: number }>();
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 小时
 const MAX_CACHE_SIZE = 10000;
 
+const UNION_ID_KEYS = ['union_id', 'unionId', 'unionid'] as const;
+
+/** 从钉钉用户响应中提取 unionId，兼容不同 API/历史 payload 命名。 */
+export function extractUserUnionId(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const record = payload as Record<string, unknown>;
+  for (const key of UNION_ID_KEYS) {
+    const value = record[key];
+    if (value == null) continue;
+    const unionId = String(value).trim();
+    if (unionId) return unionId;
+  }
+  return null;
+}
+
 function getCachedUser(corp_id: string, user_id: string): UserInfo | null {
   const key = `${corp_id}:${user_id}`;
   const cached = userCache.get(key);
@@ -95,6 +110,7 @@ export async function processUserSnapshot(
     await upsertSnapshot({
       corp_id,
       user_id,
+      union_id: extractUserUnionId(userInfo),
       name: userInfo.name,
       dept_id_list: userInfo.dept_id_list,
       title: userInfo.title,

@@ -65,6 +65,7 @@ export interface DingUserSnapshot {
   id: bigint;
   corp_id: string;
   user_id: string;
+  union_id: string | null;
   name: string | null;
   dept_id_list: JsonValue | null;
   title: string | null;
