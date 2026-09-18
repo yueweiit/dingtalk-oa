@@ -39,8 +39,8 @@ export function normalizeTasks(
     approver_user_name: task.userName ?? null,
     approver_dept_id: task.deptId ?? null,
     approver_dept_name: task.deptName ?? null,
-    start_time: parseDingTalkTime(task.startTime),
-    end_time: parseDingTalkTime(task.endTime),
+    start_time: parseDingTalkTime(task.startTime ?? task.createTime),
+    end_time: parseDingTalkTime(task.endTime ?? task.finishTime),
     remark: task.remark ?? null,
     raw_payload: task as unknown as JsonValue,
   }));

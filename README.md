@@ -41,6 +41,7 @@
 | `ding_form_field` | 表单字段定义 | getInstance() API |
 | `ding_user_snapshot` | 用户信息快照 | getUser() API（基于 hash 去重） |
 | `backfill_cursor` | 回填进度 | 回填任务自动写入 |
+| `ding_alert_notification` | 统一预警发送状态、去重与审计 | 审批处理及预警定时任务 |
 
 ## 快速开始
 
@@ -213,6 +214,16 @@ npx tsx scripts/backfill.ts --help
 | 每天 03:00 | 日志清理 | 清理 90 天前的成功事件日志 |
 | 每天 04:00 | 模板同步 | 从钉钉同步审批模板列表 |
 | 每 15 分钟 | 审批中状态核对 | 限量核对仍为 `RUNNING`（审批中）的实例，兜底 Kafka / Stream 漏掉的状态变更 |
+| 每 30 分钟 | 审批超时预警 | 对指定流程合并发送距 24 小时超时前 40 分钟及超时后 40 分钟内的提醒 |
+
+### 统一预警机器人
+
+预算预警、审批超时和空审批节点共用独立的企业内部机器人，与其他业务机器人隔离。机器人凭据和接收人只配置在 `.env`，不得提交到 Git。所有定时任务使用 `Asia/Shanghai` 时区。
+
+- 审批超时：正式阈值为 24 小时，每 30 分钟扫描一次；在超时前 40 分钟和超时后 40 分钟两个窗口内分别提醒，同批多张审批合并为一条消息，并通过 `ding_alert_notification` 去重。
+- 预算预警：审批提交后，OA 按流程组件 ID 提取月份、预算类型、服务主体和申请金额，再调用预算系统内部汇总接口。预计使用率达到 90% 或超预算时发送提醒；OA 不读取费用明细。
+- 空审批节点：审批提交后调用钉钉流程预测接口，检查按当前表单选项得到的实际后续路径。普通审批节点没有审批人时提醒；由发起人后续自选审批人的节点不判为空节点。
+- 动态流程：预测请求使用本次提交的表单值，因此不同选项产生的分支会按实际路径检查，而不是只检查模板默认路径。
 
 ## API 接口
 
@@ -349,6 +360,20 @@ dingtalk-oa/
 | APPROVAL_STATUS_RECONCILE_CRON | 否 | */15 * * * * | 审批中状态核对 cron 表达式（默认每 15 分钟） |
 | APPROVAL_STATUS_RECONCILE_BATCH_SIZE | 否 | 100 | 单次最多核对的审批中实例数量，范围 1-500 |
 | APPROVAL_STATUS_RECONCILE_DELAY_MS | 否 | 500 | 状态核对中每次钉钉 API 请求之间的间隔（毫秒） |
+| DINGTALK_ALERT_ROBOT_CODE | 预警启用时是 | - | 独立企业内部预警机器人编码 |
+| DINGTALK_ALERT_CLIENT_ID | 预警启用时是 | - | 预警机器人客户端 ID |
+| DINGTALK_ALERT_CLIENT_SECRET | 预警启用时是 | - | 预警机器人客户端密钥，仅保存在 `.env` |
+| DINGTALK_ALERT_RECIPIENT_USER_IDS | 预警启用时是 | - | 逗号分隔的通知接收人 userId |
+| APPROVAL_TIMEOUT_PROCESS_CODES | 否 | - | 启用超时提醒的流程码列表 |
+| APPROVAL_TIMEOUT_MONITOR_CRON | 否 | */30 * * * * | 超时扫描周期，正式环境每 30 分钟 |
+| APPROVAL_TIMEOUT_MINUTES | 否 | 1440 | 正式审批超时阈值，单位分钟 |
+| APPROVAL_TIMEOUT_WINDOW_BEFORE_MINUTES | 否 | 40 | 超时前提醒窗口，单位分钟 |
+| APPROVAL_TIMEOUT_WINDOW_AFTER_MINUTES | 否 | 40 | 超时后提醒窗口，单位分钟 |
+| APPROVAL_EMPTY_NODE_PROCESS_CODES | 否 | - | 提交时检查空审批节点的流程码列表 |
+| BUDGET_ALERT_PROCESS_CODES | 否 | - | 启用预算预警的流程码列表 |
+| BUDGET_ALERT_FIELD_MAP | 否 | - | 各流程稳定组件 ID 的 JSON 映射 |
+| BUDGET_ALERT_API_URL | 否 | http://127.0.0.1:3001/api/dingtalk/alert-budget-snapshot | 预算汇总内部接口 |
+| BUDGET_ALERT_API_KEY | 预算预警启用时是 | - | OA 与预算服务共享的内部接口密钥 |
 | LOG_LEVEL | 否 | info | 日志级别 |
 | PORT | 否 | 3000 | 服务端口 |
 

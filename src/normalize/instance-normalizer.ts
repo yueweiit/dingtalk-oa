@@ -61,7 +61,11 @@ export function normalizeInstance(
  * 解析钉钉时间字符串（UTC+8）
  * 钉钉返回格式通常是：2026-07-03T10:00:00Z 或 2026-07-03 10:00:00
  */
-export function parseDingTalkTime(timeStr: string | null | undefined): Date | null {
+export function parseDingTalkTime(value: unknown): Date | null {
+  if (value instanceof Date && Number.isFinite(value.getTime())) return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return new Date(value);
+
+  const timeStr = String(value ?? '').trim();
   if (!timeStr) return null;
 
   try {
@@ -71,8 +75,9 @@ export function parseDingTalkTime(timeStr: string | null | undefined): Date | nu
       return new Date(timestamp);
     }
 
-    // 解析字符串时间
-    const date = new Date(timeStr);
+    // 钉钉带 Z 的时间实际是北京时间墙上时间，不能按 UTC 直接解析。
+    const normalized = /Z$/i.test(timeStr) ? `${timeStr.slice(0, -1)}+08:00` : timeStr;
+    const date = new Date(normalized);
     if (isNaN(date.getTime())) {
       console.warn('[InstanceNormalizer] 无法解析时间:', timeStr);
       return null;

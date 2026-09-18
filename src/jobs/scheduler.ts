@@ -4,6 +4,7 @@ import { runBackfill } from './backfill.js';
 import { syncProcessTemplates } from './process-template-sync.js';
 import { cleanupOldEvents } from '../db/queries/event-log.js';
 import { reconcileRunningApprovalStatuses } from './approval-status-reconcile.js';
+import { monitorApprovalTimeouts } from './approval-timeout-monitor.js';
 
 let scheduledTasks: cron.ScheduledTask[] = [];
 
@@ -77,13 +78,24 @@ export function startScheduler(): void {
     timezone: 'Asia/Shanghai',
   });
 
-  scheduledTasks.push(backfillTask, cleanupTask, templateSyncTask, statusReconcileTask);
+  const approvalTimeoutTask = cron.schedule(config.APPROVAL_TIMEOUT_MONITOR_CRON, async () => {
+    try {
+      await monitorApprovalTimeouts();
+    } catch (error) {
+      console.error('[Scheduler] 审批超时检查失败:', error);
+    }
+  }, {
+    timezone: 'Asia/Shanghai',
+  });
+
+  scheduledTasks.push(backfillTask, cleanupTask, templateSyncTask, statusReconcileTask, approvalTimeoutTask);
 
   console.log('[Scheduler] 定时任务已注册:');
   console.log('  - 每天 02:00: 补数据任务');
   console.log('  - 每天 03:00: 事件日志清理');
   console.log('  - 每天 04:00: 审批模板同步');
   console.log(`  - ${config.APPROVAL_STATUS_RECONCILE_CRON}: 审批中状态核对（每次最多 ${config.APPROVAL_STATUS_RECONCILE_BATCH_SIZE} 条）`);
+  console.log(`  - ${config.APPROVAL_TIMEOUT_MONITOR_CRON}: 审批超时提醒`);
 }
 
 export function stopScheduler(): void {

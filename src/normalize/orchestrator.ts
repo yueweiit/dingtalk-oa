@@ -13,6 +13,8 @@ import { normalizeTasks } from './task-normalizer.js';
 import { processUserSnapshot } from './user-snapshot.js';
 import { saveFormFields } from './form-field-extractor.js';
 import type { JsonValue } from '../db/json-types.js';
+import { monitorBudgetAlertForInstance } from '../jobs/budget-alert-monitor.js';
+import { monitorEmptyApprovalNodesForInstance } from '../jobs/approval-empty-node-monitor.js';
 
 export interface ProcessMessageParams {
   eventType: string;
@@ -164,12 +166,39 @@ export async function processApprovalMessage(params: ProcessMessageParams): Prom
       }
     }
 
-    await refreshApprovalInstance({
+    const instanceDetail = await refreshApprovalInstance({
       corpId: params.corpId,
       processInstanceId: params.processInstanceId,
       processCode: params.processCode,
       originatorUserId: (params.payload?.staffId || params.payload?.StaffId) as string | undefined,
     });
+    const hydratedInstanceDetail: ApprovalInstanceDetail = {
+      ...instanceDetail,
+      processInstanceId: instanceDetail.processInstanceId || params.processInstanceId,
+      processCode: instanceDetail.processCode || params.processCode,
+      originatorUserId: instanceDetail.originatorUserId
+        || (params.payload?.staffId || params.payload?.StaffId) as string | undefined,
+    };
+
+    // 流程预测是通知旁路；预测或机器人异常不能影响审批归档。
+    try {
+      const emptyNodeResult = await monitorEmptyApprovalNodesForInstance(params.corpId, hydratedInstanceDetail);
+      console.log(
+        `[EmptyApprovalNode] ${params.processInstanceId}: status=${emptyNodeResult.status}, empty=${emptyNodeResult.emptyNodes.length}, sent=${emptyNodeResult.sent}${emptyNodeResult.reason ? `, reason=${emptyNodeResult.reason}` : ''}`,
+      );
+    } catch (error) {
+      console.error(`[Orchestrator] 空审批节点检查失败，不阻断归档: ${params.processInstanceId}`, error);
+    }
+
+    // 预算预警是通知旁路；任何预算服务或机器人异常都不能影响审批归档。
+    try {
+      const budgetAlertResult = await monitorBudgetAlertForInstance(params.corpId, hydratedInstanceDetail);
+      console.log(
+        `[BudgetAlert] ${params.processInstanceId}: status=${budgetAlertResult.status}, sent=${budgetAlertResult.sent}${budgetAlertResult.reason ? `, reason=${budgetAlertResult.reason}` : ''}`,
+      );
+    } catch (error) {
+      console.error(`[Orchestrator] 预算预警检查失败，不阻断归档: ${params.processInstanceId}`, error);
+    }
 
     // 更新事件日志为成功
     await updateEventStatus({

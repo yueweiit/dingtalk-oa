@@ -3,10 +3,13 @@ import {
   listProcessTemplatesResponseSchema,
   searchInstancesResponseSchema,
   getInstanceResponseSchema,
+  processForecastResponseSchema,
   getUserResponseSchema,
   type ProcessTemplate,
   type ApprovalInstance,
   type ApprovalInstanceDetail,
+  type FormComponentValue,
+  type ProcessForecastResult,
   type UserInfo,
 } from './types.js';
 
@@ -164,6 +167,29 @@ export async function getInstance(processInstanceId: string): Promise<ApprovalIn
 
   const parsed = getInstanceResponseSchema.parse(data);
   return parsed.result;
+}
+
+export async function forecastProcess(params: {
+  processCode: string;
+  userId: string;
+  deptId: number;
+  formComponentValues: FormComponentValue[];
+}): Promise<ProcessForecastResult> {
+  const formComponentValues = params.formComponentValues
+    .filter((field) => field.name && field.value != null && field.value !== '')
+    .map((field) => Object.fromEntries(
+      Object.entries(field).filter(([, value]) => value != null)
+    ));
+  const data = await apiCall<unknown>('/workflow/processes/forecast', {
+    method: 'POST',
+    body: {
+      processCode: params.processCode,
+      userId: params.userId,
+      deptId: params.deptId,
+      formComponentValues,
+    },
+  });
+  return processForecastResponseSchema.parse(data).result;
 }
 
 export async function getUser(userId: string): Promise<UserInfo> {

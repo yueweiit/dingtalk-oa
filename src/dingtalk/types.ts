@@ -63,6 +63,8 @@ export const approvalTaskSchema = z.object({
   deptName: z.string().nullish(),
   startTime: z.string().nullish(),
   endTime: z.string().nullish(),
+  createTime: z.string().nullish(),
+  finishTime: z.string().nullish(),
   remark: z.string().nullish(),
 }).passthrough();
 
@@ -71,6 +73,7 @@ export const approvalInstanceDetailSchema = z.object({
   processInstanceId: z.string().nullish(),
   processCode: z.string().nullish(),
   originatorId: z.string().nullish(),
+  originatorUserId: z.string().nullish(),
   originatorDeptId: z.string().nullish(),
   status: z.string(),
   result: z.string().nullish(),
@@ -90,6 +93,37 @@ export const approvalInstanceDetailSchema = z.object({
 
 export const getInstanceResponseSchema = z.object({
   result: approvalInstanceDetailSchema,
+});
+
+export const processForecastActionerSchema = z.object({
+  userId: z.string().nullish(),
+  name: z.string().nullish(),
+}).passthrough();
+
+export const processForecastActivityRuleSchema = z.object({
+  activityId: z.string().nullish(),
+  activityName: z.string().nullish(),
+  activityType: z.string().nullish(),
+  isTargetSelect: z.boolean().nullish(),
+  activityActioners: z.array(processForecastActionerSchema).optional(),
+  workflowActor: z.object({
+    actorType: z.string().nullish(),
+    actorSelectionType: z.string().nullish(),
+    required: z.boolean().nullish(),
+  }).passthrough().nullish(),
+}).passthrough();
+
+export const processForecastResponseSchema = z.object({
+  result: z.object({
+    isForecastSuccess: z.boolean(),
+    isStaticWorkflow: z.boolean().optional(),
+    processCode: z.string().optional(),
+    workflowActivityRules: z.array(processForecastActivityRuleSchema).optional(),
+    workflowForecastNodes: z.array(z.object({
+      activityId: z.string().nullish(),
+      outId: z.string().nullish(),
+    }).passthrough()).optional(),
+  }).passthrough(),
 });
 
 // 用户信息
@@ -122,6 +156,7 @@ export type TokenResponse = z.infer<typeof tokenResponseSchema>;
 export type ProcessTemplate = z.infer<typeof processTemplateSchema>;
 export type ApprovalInstance = z.infer<typeof approvalInstanceSchema>;
 export type ApprovalInstanceDetail = z.infer<typeof approvalInstanceDetailSchema>;
+export type ProcessForecastResult = z.infer<typeof processForecastResponseSchema>['result'];
 export type ApprovalTask = z.infer<typeof approvalTaskSchema>;
 export type FormComponentValue = z.infer<typeof formComponentValueSchema>;
 export type UserInfo = z.infer<typeof userInfoSchema>;
