@@ -35,7 +35,7 @@ export async function startStreamListener(): Promise<void> {
   client = new DWClient({
     clientId: config.DINGTALK_APP_KEY,
     clientSecret: config.DINGTALK_APP_SECRET,
-    debug: true,
+    debug: false,
   });
 
   client.registerCallbackListener('/bpms/instance_change', async (event: any) => {
