@@ -1,5 +1,5 @@
 import { getConfig } from '../config/index.js';
-import { findEnabledTemplates, updateLastSyncAt } from '../db/queries/process-template.js';
+import { findBackfillTemplates, updateLastSyncAt } from '../db/queries/process-template.js';
 import { getAllCorpIds } from '../db/queries/corp-config.js';
 import { searchInstances, getInstance, delay } from '../dingtalk/api-client.js';
 import { normalizeInstance } from '../normalize/instance-normalizer.js';
@@ -61,7 +61,7 @@ export async function runBackfill(params: BackfillOptions): Promise<void> {
     if (params.process_code) {
       templates = [{ corp_id, process_code: params.process_code, enabled: true, is_deleted: false }];
     } else {
-      templates = await findEnabledTemplates(corp_id);
+      templates = await findBackfillTemplates(corp_id);
     }
 
     console.log(`[Backfill] 企业 ${corp_id}: ${templates.length} 个模板，共 ${chunks.length * templates.length} 个任务`);

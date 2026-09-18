@@ -1,10 +1,13 @@
 import cron from 'node-cron';
 import { getConfig } from '../config/index.js';
+import { runFinancialBackfill } from './financial-backfill.js';
+import { getAllCorpIds } from '../db/queries/corp-config.js';
 import { runBackfill } from './backfill.js';
 import { syncProcessTemplates } from './process-template-sync.js';
 import { cleanupOldEvents } from '../db/queries/event-log.js';
 import { reconcileRunningApprovalStatuses } from './approval-status-reconcile.js';
 import { monitorApprovalTimeouts } from './approval-timeout-monitor.js';
+import { refreshCompletedLogisticsApprovals } from './completed-approval-refresh.js';
 
 let scheduledTasks: cron.ScheduledTask[] = [];
 
@@ -87,6 +90,44 @@ export function startScheduler(): void {
   }, {
     timezone: 'Asia/Shanghai',
   });
+
+  if (config.FINANCIAL_BACKFILL_ENABLED) {
+    let running = false;
+    scheduledTasks.push(cron.schedule(config.FINANCIAL_BACKFILL_CRON, async () => {
+      if (running) return;
+      running = true;
+      try {
+        const corps = config.DINGTALK_CORP_ID ? [config.DINGTALK_CORP_ID] : (await getAllCorpIds()).map(c => c.corp_id);
+        for (const corpId of corps) {
+          const result = await runFinancialBackfill({corpId,maxWindows:config.FINANCIAL_BACKFILL_MAX_WINDOWS,delayMs:config.FINANCIAL_BACKFILL_DELAY_MS});
+          console.log('[Scheduler] 财务历史归档:', result);
+          if (result?.rateLimited) break;
+        }
+      } catch (error) {
+        console.error('[Scheduler] 财务历史归档失败:', error);
+      } finally { running = false; }
+    }, {timezone:'Asia/Shanghai'}));
+  }
+
+  if (config.COMPLETED_APPROVAL_REFRESH_ENABLED) {
+    let running = false;
+    scheduledTasks.push(cron.schedule(config.COMPLETED_APPROVAL_REFRESH_CRON, async () => {
+      if (running) return;
+      running = true;
+      try {
+        const result = await refreshCompletedLogisticsApprovals({
+          limit: config.COMPLETED_APPROVAL_REFRESH_BATCH_SIZE,
+          delayMs: config.COMPLETED_APPROVAL_REFRESH_DELAY_MS,
+          minIntervalSeconds: config.COMPLETED_APPROVAL_REFRESH_MIN_INTERVAL_SECONDS,
+        });
+        console.log('[Scheduler] 已完成物流审批复查:', result);
+      } catch (error) {
+        console.error('[Scheduler] 已完成物流审批复查失败:', error);
+      } finally {
+        running = false;
+      }
+    }, { timezone: 'Asia/Shanghai' }));
+  }
 
   scheduledTasks.push(backfillTask, cleanupTask, templateSyncTask, statusReconcileTask, approvalTimeoutTask);
 

@@ -1,0 +1,311 @@
+[
+  {
+    "description": "child alone",
+    "components": [
+      {
+        "name": "服务类采购",
+        "value": "物流及运输服务"
+      }
+    ],
+    "expected": true
+  },
+  {
+    "description": "current provider parent",
+    "components": [
+      {
+        "name": "采购支出Gastos de Compra",
+        "value": "服务商采购Compra de proveedores"
+      },
+      {
+        "name": "服务类采购 Adquisiciones de servicios",
+        "value": "物流及运输服务Servicios de logística y transporte"
+      }
+    ],
+    "expected": true
+  },
+  {
+    "description": "current services parent",
+    "components": [
+      {
+        "name": "采购支出Gastos de Compra",
+        "value": "Compra de servicios"
+      },
+      {
+        "name": "服务类采购 Adquisiciones de servicios",
+        "value": "物流及运输服务Servicios de logística y transporte"
+      }
+    ],
+    "expected": true
+  },
+  {
+    "description": "explicit child with commodity parent",
+    "components": [
+      {
+        "name": "采购支出",
+        "value": "商品类采购"
+      },
+      {
+        "name": "服务类采购",
+        "value": "物流及运输服务"
+      }
+    ],
+    "expected": true
+  },
+  {
+    "description": "explicit child with empty parent",
+    "components": [
+      {
+        "name": "采购支出",
+        "value": ""
+      },
+      {
+        "name": "服务类采购",
+        "value": "物流及运输服务"
+      }
+    ],
+    "expected": true
+  },
+  {
+    "description": "child JSON array",
+    "components": [
+      {
+        "name": "服务类采购",
+        "value": "[\"物流及运输服务\"]"
+      }
+    ],
+    "expected": true
+  },
+  {
+    "description": "Spanish child without accents",
+    "components": [
+      {
+        "name": "Adquisiciones de servicios",
+        "value": "Servicios de logistica y transporte"
+      }
+    ],
+    "expected": true
+  },
+  {
+    "description": "legacy full path",
+    "components": [
+      {
+        "name": "采购类别",
+        "value": [
+          "服务类采购",
+          "物流及运输服务"
+        ]
+      }
+    ],
+    "expected": true
+  },
+  {
+    "description": "provider full path",
+    "components": [
+      {
+        "name": "采购类别",
+        "value": [
+          "服务商采购Compra de proveedores",
+          "物流及运输服务Servicios de logística y transporte"
+        ]
+      }
+    ],
+    "expected": true
+  },
+  {
+    "description": "bilingual full path",
+    "components": [
+      {
+        "name": "采购类别",
+        "value": "服务类采购Compra De Servicios / 物流及运输服务Servicios de logística y transporte"
+      }
+    ],
+    "expected": true
+  },
+  {
+    "description": "full path with conflicting commodity parent",
+    "components": [
+      {
+        "name": "采购支出",
+        "value": "商品类采购"
+      },
+      {
+        "name": "采购类别",
+        "value": [
+          "服务类采购",
+          "物流及运输服务"
+        ]
+      }
+    ],
+    "expected": false
+  },
+  {
+    "description": "empty child field label",
+    "components": [
+      {
+        "name": "采购支出",
+        "value": "服务商采购Compra de proveedores"
+      },
+      {
+        "name": "服务类采购 Adquisiciones de servicios",
+        "value": ""
+      },
+      {
+        "name": "物流及运输服务Servicios de logística y transporte",
+        "value": ""
+      }
+    ],
+    "expected": false
+  },
+  {
+    "description": "null child",
+    "components": [
+      {
+        "name": "服务类采购",
+        "value": null
+      }
+    ],
+    "expected": false
+  },
+  {
+    "description": "empty array child",
+    "components": [
+      {
+        "name": "服务类采购",
+        "value": []
+      }
+    ],
+    "expected": false
+  },
+  {
+    "description": "nested child",
+    "components": [
+      {
+        "name": "服务类采购",
+        "value": {
+          "value": "物流及运输服务"
+        }
+      }
+    ],
+    "expected": false
+  },
+  {
+    "description": "narrative field",
+    "components": [
+      {
+        "name": "备注",
+        "value": "服务类采购→物流及运输服务"
+      }
+    ],
+    "expected": false
+  },
+  {
+    "description": "narrative parent",
+    "components": [
+      {
+        "name": "采购支出",
+        "value": "上次使用服务类采购→物流及运输服务，本次为普通物料"
+      }
+    ],
+    "expected": false
+  },
+  {
+    "description": "narrative child",
+    "components": [
+      {
+        "name": "服务类采购",
+        "value": "上次使用物流及运输服务，本次为咨询"
+      }
+    ],
+    "expected": false
+  },
+  {
+    "description": "punctuated fake child",
+    "components": [
+      {
+        "name": "服务类采购",
+        "value": "物！流及运输服务"
+      }
+    ],
+    "expected": false
+  },
+  {
+    "description": "explanation label",
+    "components": [
+      {
+        "name": "服务类采购说明",
+        "value": "物流及运输服务"
+      }
+    ],
+    "expected": false
+  },
+  {
+    "description": "logistics field label only",
+    "components": [
+      {
+        "name": "物流及运输服务",
+        "value": "海运费用"
+      }
+    ],
+    "expected": false
+  },
+  {
+    "description": "commodity full path",
+    "components": [
+      {
+        "name": "采购类别",
+        "value": [
+          "商品类采购",
+          "物流及运输服务"
+        ]
+      }
+    ],
+    "expected": false
+  },
+  {
+    "description": "service parent only",
+    "components": [
+      {
+        "name": "采购支出",
+        "value": "服务类采购"
+      }
+    ],
+    "expected": false
+  },
+  {
+    "description": "consulting child",
+    "components": [
+      {
+        "name": "采购支出",
+        "value": "服务类采购"
+      },
+      {
+        "name": "服务类采购",
+        "value": "咨询服务"
+      }
+    ],
+    "expected": false
+  },
+  {
+    "description": "malformed JSON",
+    "components": [
+      {
+        "name": "采购类别",
+        "value": "[\"服务类采购\",\"物流及运输服务\""
+      }
+    ],
+    "expected": false
+  },
+  {
+    "description": "multi value child",
+    "components": [
+      {
+        "name": "服务类采购",
+        "value": [
+          "物流及运输服务",
+          "咨询服务"
+        ]
+      }
+    ],
+    "expected": false
+  }
+]

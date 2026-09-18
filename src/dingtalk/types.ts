@@ -134,6 +134,8 @@ export const userInfoSchema = z.object({
   avatar: z.string().optional(),
   dept_id_list: z.array(z.preprocess((v) => String(v), z.string())).optional(),
   unionid: z.string().optional(),
+  unionId: z.string().optional(),
+  union_id: z.string().optional(),
 });
 
 export const getUserResponseSchema = z.object({

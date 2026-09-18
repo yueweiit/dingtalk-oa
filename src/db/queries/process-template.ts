@@ -85,3 +85,24 @@ export async function findAllTemplates(corp_id: string): Promise<DingProcessTemp
     return rows;
   });
 }
+
+/** Daily overlap scans also cover discovered financial metadata that current lists omit. */
+export async function findBackfillTemplates(corpId: string): Promise<DingProcessTemplate[]> {
+  return withClient(async client => {
+    const broadScope = (await client.query("SELECT to_regclass('costing_read.financial_template_scope') AS relation")).rows[0].relation;
+    if (!broadScope) {
+      const {rows}=await client.query<DingProcessTemplate>(`SELECT * FROM ding_process_template WHERE corp_id=$1
+        AND enabled=true AND is_deleted=false ORDER BY process_code`,[corpId]);
+      return rows;
+    }
+    const {rows}=await client.query<DingProcessTemplate>(`SELECT t.* FROM public.ding_process_template t
+      WHERE t.corp_id=$1 AND ((t.enabled=true AND t.is_deleted=false) OR EXISTS(
+        SELECT 1 FROM costing_read.financial_template_scope f WHERE f.corp_id=t.corp_id AND f.process_code=t.process_code))
+      UNION ALL
+      SELECT NULL::bigint,f.corp_id,f.process_code,f.template_name,false,true,NULL::text,NULL::timestamptz,
+        f.registered_at,f.registered_at FROM costing_read.financial_template_scope f
+      WHERE f.corp_id=$1 AND NOT EXISTS(SELECT 1 FROM public.ding_process_template t WHERE t.corp_id=f.corp_id AND t.process_code=f.process_code)
+      ORDER BY process_code`,[corpId]);
+    return rows;
+  });
+}

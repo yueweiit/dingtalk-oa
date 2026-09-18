@@ -1,7 +1,7 @@
 import { getConfig } from '../src/config/index.js';
 import { getPool, closePool, withTransaction } from '../src/db/pool.js';
 import { listProcessTemplates, getUser, listDepartments, listUsers } from '../src/dingtalk/api-client.js';
-import { computeUserHash } from '../src/normalize/user-snapshot.js';
+import { computeUserHash, extractUserUnionId } from '../src/normalize/user-snapshot.js';
 import { syncDepartmentTree } from '../src/organization/department-tree-sync.js';
 import { getTemplateAdminUserId } from '../src/dingtalk/template-admin-user.js';
 
@@ -106,6 +106,12 @@ async function syncUsers(corpId: string) {
         for (const user of result.list) {
           if (user.userid && !allUsers.has(user.userid)) {
             allUsers.set(user.userid, user);
+          } else if (user.userid) {
+            // 同一用户可能属于多个部门；优先保留带 unionId 的摘要数据。
+            const existing = allUsers.get(user.userid);
+            if (!extractUserUnionId(existing) && extractUserUnionId(user)) {
+              allUsers.set(user.userid, { ...existing, ...user });
+            }
           }
         }
         hasMore = result.hasMore;
@@ -124,20 +130,33 @@ async function syncUsers(corpId: string) {
   }
 
   // 3. 同步用户快照
-  let success = 0, skipped = 0, failed = 0;
+  let success = 0, skipped = 0, unionIdsUpdated = 0, failed = 0;
   for (const [userId, userSummary] of allUsers) {
     try {
       // 用 getUser 获取完整用户信息
       const user = await getUser(userId);
       const snapshotHash = computeUserHash(user);
+      const userUnionId = extractUserUnionId(user);
+      const unionId = userUnionId ?? extractUserUnionId(userSummary);
+      // 若 unionId 只存在于用户摘要中，也写入 raw_payload，保证无独立列时仍可查询。
+      const rawPayload = !userUnionId && unionId ? { ...user, unionid: unionId } : user;
 
       const { rows: existing } = await pool.query(
-        `SELECT id, snapshot_hash FROM ding_user_snapshot
+        `SELECT id, snapshot_hash, union_id FROM ding_user_snapshot
          WHERE corp_id = $1 AND user_id = $2 AND is_current = true LIMIT 1`,
         [corpId, userId]
       );
 
       if (existing.length > 0 && existing[0].snapshot_hash === snapshotHash) {
+        if (unionId && existing[0].union_id !== unionId) {
+          await pool.query(
+            `UPDATE ding_user_snapshot
+             SET union_id = $1, raw_payload = $2, updated_at = now()
+             WHERE id = $3`,
+            [unionId, JSON.stringify(rawPayload), existing[0].id]
+          );
+          unionIdsUpdated++;
+        }
         skipped++;
         continue;
       }
@@ -151,14 +170,15 @@ async function syncUsers(corpId: string) {
 
       await pool.query(
         `INSERT INTO ding_user_snapshot
-           (corp_id, user_id, name, dept_id_list, title, avatar, snapshot_hash, fetch_status, raw_payload, is_current)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'success', $8, true)`,
+           (corp_id, user_id, union_id, name, dept_id_list, title, avatar, snapshot_hash, fetch_status, raw_payload, is_current)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'success', $9, true)`,
         [
           corpId, userId,
+          unionId,
           user.name || null,
           user.dept_id_list ? JSON.stringify(user.dept_id_list) : null,
           user.title || null, user.avatar || null,
-          snapshotHash, JSON.stringify(user),
+          snapshotHash, JSON.stringify(rawPayload),
         ]
       );
 
@@ -180,7 +200,7 @@ async function syncUsers(corpId: string) {
     }
   }
 
-  console.log(`用户同步完成: 成功 ${success}, 跳过 ${skipped}, 失败 ${failed}`);
+  console.log(`用户同步完成: 成功 ${success}, 跳过 ${skipped}, 补齐 unionId ${unionIdsUpdated}, 失败 ${failed}`);
 }
 
 // ========== 主流程 ==========
