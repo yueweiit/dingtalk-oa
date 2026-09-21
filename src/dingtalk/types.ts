@@ -55,6 +55,7 @@ export const approvalTaskSchema = z.object({
   activityId: z.string().nullish(),
   taskId: z.preprocess((val) => (val != null ? String(val) : undefined), z.string().optional()),
   nodeName: z.string().nullish(),
+  taskGroupName: z.string().nullish(),
   status: z.string(),
   result: z.string().nullish(),
   userId: z.string().nullish(),

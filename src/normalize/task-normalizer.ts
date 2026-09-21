@@ -32,7 +32,7 @@ export function normalizeTasks(
     task_id: task.taskId ?? `task_${process_instance_id}_${index}`,
     task_order: index + 1,
     activity_id: task.activityId ?? null,
-    node_name: task.nodeName ?? null,
+    node_name: task.nodeName ?? task.taskGroupName ?? null,
     status: task.status ?? null,
     result: task.result ?? null,
     approver_user_id: task.userId ?? null,
