@@ -17,6 +17,9 @@ export interface ApprovalTimeoutCandidate {
   processCode: string;
   title: string | null;
   taskId: string;
+  nodeName: string | null;
+  approverUserId: string | null;
+  approverUserName: string | null;
   taskStartTime: Date | null;
   rawTask: unknown;
   rawInstance: unknown;
@@ -59,13 +62,6 @@ function formatWait(durationMs: number): string {
   return `${Math.floor(minutes / 60)}小时${minutes % 60}分钟`;
 }
 
-function recipientsFromConfig(): string[] {
-  return [...new Set(getConfig().DINGTALK_ALERT_RECIPIENT_USER_IDS
-    .split(/[\s,;]+/)
-    .map((value) => value.trim())
-    .filter(Boolean))];
-}
-
 function processCodesFromConfig(): string[] {
   return [...new Set(getConfig().APPROVAL_TIMEOUT_PROCESS_CODES
     .split(/[\s,;]+/)
@@ -82,12 +78,16 @@ export async function findRunningApprovalTimeoutCandidates(processCodes: string[
       process_code: string;
       title: string | null;
       task_id: string;
+      node_name: string | null;
+      approver_user_id: string | null;
+      approver_user_name: string | null;
       start_time: Date | null;
       task_raw_payload: unknown;
       instance_raw_payload: unknown;
     }>(
       `SELECT i.corp_id, i.process_instance_id, i.process_code, i.title,
-              t.task_id, t.start_time, t.raw_payload AS task_raw_payload,
+              t.task_id, t.node_name, t.approver_user_id, t.approver_user_name,
+              t.start_time, t.raw_payload AS task_raw_payload,
               i.raw_payload AS instance_raw_payload
        FROM ding_approval_instance i
        JOIN ding_approval_task t
@@ -105,6 +105,9 @@ export async function findRunningApprovalTimeoutCandidates(processCodes: string[
       processCode: row.process_code,
       title: row.title,
       taskId: row.task_id,
+      nodeName: row.node_name,
+      approverUserId: row.approver_user_id,
+      approverUserName: row.approver_user_name,
       taskStartTime: row.start_time,
       rawTask: row.task_raw_payload,
       rawInstance: row.instance_raw_payload,
@@ -125,9 +128,8 @@ export async function monitorApprovalTimeouts(
   dependencies: ApprovalTimeoutMonitorDependencies = defaultDependencies,
 ): Promise<{ scanned: number; eligible: number; sent: number; failed: number }> {
   const processCodes = processCodesFromConfig();
-  const recipients = recipientsFromConfig();
-  if (!processCodes.length || !recipients.length) {
-    console.log('[ApprovalTimeout] 未配置流程码或接收人，跳过检查');
+  if (!processCodes.length) {
+    console.log('[ApprovalTimeout] 未配置流程码，跳过检查');
     return { scanned: 0, eligible: 0, sent: 0, failed: 0 };
   }
 
@@ -149,41 +151,49 @@ export async function monitorApprovalTimeouts(
     if (waitedMs < lowerBoundMs || waitedMs > upperBoundMs) continue;
     result.eligible++;
 
+    const task = asRecord(candidate.rawTask);
+    const recipientUserId = String(candidate.approverUserId ?? task.userId ?? '').trim();
+    if (!recipientUserId) {
+      console.warn(`[ApprovalTimeout] 当前节点缺少审批人 userid，跳过通知: ${candidate.processInstanceId}/${candidate.taskId}`);
+      continue;
+    }
+
     const phase = waitedMs < timeoutMs ? 'before' : 'after';
     const phaseLabel = phase === 'before' ? '即将超时' : '已超时';
     const approvalUrl = `https://applink.dingtalk.com/approval/detail?corpId=${encodeURIComponent(candidate.corpId)}&instanceId=${encodeURIComponent(candidate.processInstanceId)}`;
     const content = [
       `【审批${phaseLabel}】`,
       `流程：${candidate.title || candidate.processCode}`,
+      `节点：${candidate.nodeName || '未命名审批节点'}`,
+      `审批人：${candidate.approverUserName || recipientUserId}`,
       `已等待：${formatWait(waitedMs)}（时限 ${formatWait(timeoutMs)}）`,
       `审批单：${approvalUrl}`,
     ].join('\n');
 
-    for (const recipientUserId of recipients) {
-      const key: AlertDeliveryKey = {
-        corpId: candidate.corpId,
-        processInstanceId: candidate.processInstanceId,
-        alertType: ALERT_TYPE,
-        alertPhase: `${phase}:${candidate.taskId}`,
-        recipientUserId,
-      };
-      const claimed = await dependencies.claimDelivery(key, {
-        processCode: candidate.processCode,
-        taskId: candidate.taskId,
-        waitedMs,
-        phase,
-      });
-      if (!claimed) continue;
-      try {
-        await dependencies.send([recipientUserId], content);
-        await dependencies.markSent(key);
-        result.sent++;
-      } catch (error) {
-        result.failed++;
-        const message = error instanceof Error ? error.message : String(error);
-        await dependencies.markFailed(key, message);
-        console.error(`[ApprovalTimeout] 发送失败: ${candidate.processInstanceId}`, message);
-      }
+    const key: AlertDeliveryKey = {
+      corpId: candidate.corpId,
+      processInstanceId: candidate.processInstanceId,
+      alertType: ALERT_TYPE,
+      alertPhase: `${phase}:${candidate.taskId}`,
+      recipientUserId,
+    };
+    const claimed = await dependencies.claimDelivery(key, {
+      processCode: candidate.processCode,
+      taskId: candidate.taskId,
+      approverUserId: recipientUserId,
+      waitedMs,
+      phase,
+    });
+    if (!claimed) continue;
+    try {
+      await dependencies.send([recipientUserId], content);
+      await dependencies.markSent(key);
+      result.sent++;
+    } catch (error) {
+      result.failed++;
+      const message = error instanceof Error ? error.message : String(error);
+      await dependencies.markFailed(key, message);
+      console.error(`[ApprovalTimeout] 发送失败: ${candidate.processInstanceId}`, message);
     }
   }
 

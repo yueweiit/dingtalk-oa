@@ -92,7 +92,7 @@ export const configSchema = z.object({
   PACKING_SHEET_MAX_ROWS: z.coerce.number().int().min(1).max(10_000).default(5000),
   PACKING_SHEET_MAX_COLUMNS: z.coerce.number().int().min(1).max(200).default(100),
 
-  // 统一预警机器人。未配置流程码或接收人时，监控任务只记录跳过，不发送消息。
+  // 统一预警机器人。预算预警和空节点使用固定接收人；审批超时通知发送给当前节点审批人。
   DINGTALK_ALERT_ROBOT_CODE: z.string().trim().min(1).optional(),
   DINGTALK_ALERT_CLIENT_ID: z.string().trim().min(1).optional(),
   DINGTALK_ALERT_CLIENT_SECRET: z.string().trim().min(1).optional(),
