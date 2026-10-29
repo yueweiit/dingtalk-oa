@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import { getConfig } from './config/index.js';
 import { webhookRoutes } from './webhook/index.js';
 import { connectorRoutes } from './connector/index.js';
+import { approvalReadRoutes } from './approval-api/index.js';
 import { getPool } from './db/pool.js';
 import { tokenManager } from './dingtalk/token-manager.js';
 import { getKafkaConsumerHealth, isKafkaConsumerHealthy } from './kafka/consumer.js';
@@ -15,6 +16,7 @@ export async function createApp() {
   const fastify = Fastify({
     logger: {
       level: config.LOG_LEVEL,
+      redact: ['req.headers.authorization', 'req.headers.cookie'],
       ...(isDev && {
         transport: {
           target: 'pino-pretty',
@@ -36,6 +38,7 @@ export async function createApp() {
   // 注册 Webhook 路由
   await fastify.register(webhookRoutes);
   await fastify.register(connectorRoutes);
+  await fastify.register(approvalReadRoutes);
 
   // 健康检查：存活检查（仅判断服务进程是否活着）
   fastify.get('/health/live', async (request, reply) => {

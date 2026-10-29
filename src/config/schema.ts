@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { readApiClientsSchema } from '../approval-api/config.js';
 
 const packingWorkbookSchema = z.object({
   year: z.number().int().min(2000).max(2200),
@@ -54,6 +55,10 @@ export const configSchema = z.object({
   // Webhook（备用）
   WEBHOOK_TOKEN: z.string().optional(),
   WEBHOOK_AES_KEY: z.string().optional(),
+
+  // Service-to-service archive access; an empty client list disables the routes.
+  APPROVAL_READ_API_CLIENTS_JSON: readApiClientsSchema,
+  APPROVAL_READ_API_REQUESTS_PER_MINUTE: z.coerce.number().int().min(1).max(10000).default(120),
 
   // Backfill
   BACKFILL_LOOKBACK_DAYS: z.coerce.number().default(1),
