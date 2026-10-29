@@ -2,7 +2,12 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import type { ReadApiClient } from './config.js';
 
-export const timestampSchema = z.string().max(40).datetime({ offset: true });
+export const timestampSchema = z.string().max(40).datetime({ offset: true }).refine(value => {
+  const offset = /[+-](\d{2}):?(\d{2})$/.exec(value);
+  // PostgreSQL accepts timezone displacement up to 15:59; the ISO regex alone does not bound it.
+  if (offset && (Number(offset[1]) > 15 || Number(offset[2]) > 59)) return false;
+  return Number(value.slice(0, 4)) >= 1 && Number.isFinite(Date.parse(value));
+}, 'invalid timestamp or timezone offset');
 const identifier = z.string().trim().min(1).max(128);
 
 export const filtersSchema = z.object({

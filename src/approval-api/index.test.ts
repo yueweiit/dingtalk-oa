@@ -196,6 +196,19 @@ describe('approval archive read API', () => {
     expect(download.json()).toEqual({ success: false, code: 'ATTACHMENT_UNAVAILABLE' });
   });
 
+  it.each(['approvals', 'attachments'])('rejects invalid timezone offsets before %s SQL', async resource => {
+    const { app, dependencies } = await setup();
+    for (const stamp of ['2026-10-29T01:00:00+99:99', '2026-10-29T01:00:00+25:00',
+      '2026-10-29T01:00:00+08:75', '2026-10-29T01:00:00+16:00']) {
+      const query = new URLSearchParams({ corpId: 'corp-1', updatedAfter: stamp });
+      const response = await app.inject({ url: `/api/v1/${resource}?${query}`, headers: authorization });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({ success: false, code: 'INVALID_REQUEST' });
+    }
+    expect(dependencies.approvals).not.toHaveBeenCalled();
+    expect(dependencies.attachments).not.toHaveBeenCalled();
+  });
+
   it('enforces a per-client request quota and recovers after the window', async () => {
     let now = 0;
     const { app, dependencies } = await setup({ requestsPerMinute: 1, now: () => now });

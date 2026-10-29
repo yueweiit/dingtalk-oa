@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readApiClientsSchema } from './config.js';
-import { decodeCursor, encodeCursor } from './pagination.js';
+import { decodeCursor, encodeCursor, timestampSchema } from './pagination.js';
 
 const client = { clientId: 'erp', tokenSha256: 'a'.repeat(64), corpIds: ['corp-1'], processCodes: ['PROC-1'] };
 describe('approval read credential configuration', () => {
@@ -26,4 +26,20 @@ describe('approval read credential configuration', () => {
       expect(() => decodeCursor(cursor, other, 'approvals', filters, 0)).toThrow();
     }
   });
+});
+
+describe('approval read timestamps', () => {
+  it.each(['2026-10-29T01:00:00+99:99', '2026-10-29T01:00:00+25:00',
+    '2026-10-29T01:00:00+08:75', '2026-10-29T01:00:00-16:00',
+    '2026-02-30T01:00:00Z', '0000-01-01T00:00:00Z', '2026-10-29T01:00:00'])
+    ('rejects an invalid timestamp: %s', value => {
+      expect(timestampSchema.safeParse(value).success).toBe(false);
+    });
+
+  it.each(['2026-10-29T01:00:00.123456Z', '2026-10-29T01:00:00.123456+08:00',
+    '2026-10-29T01:00:00-05:30', '2026-10-29T01:00:00+15:59', '2024-02-29T01:00:00Z'])
+    ('keeps valid timezone and microsecond input verbatim: %s', value => {
+      expect(timestampSchema.parse(value)).toBe(value);
+    });
+
 });
