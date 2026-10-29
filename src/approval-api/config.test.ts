@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readApiClientsSchema } from './config.js';
 import { decodeCursor, encodeCursor, timestampSchema } from './pagination.js';
+import { configSchema } from '../config/schema.js';
 
 const client = { clientId: 'erp', tokenSha256: 'a'.repeat(64), corpIds: ['corp-1'], processCodes: ['PROC-1'] };
 describe('approval read credential configuration', () => {
@@ -28,7 +29,7 @@ describe('approval read credential configuration', () => {
   });
 });
 
-describe('approval read timestamps', () => {
+describe('approval read timestamps and transfer limits', () => {
   it.each(['2026-10-29T01:00:00+99:99', '2026-10-29T01:00:00+25:00',
     '2026-10-29T01:00:00+08:75', '2026-10-29T01:00:00-16:00',
     '2026-02-30T01:00:00Z', '0000-01-01T00:00:00Z', '2026-10-29T01:00:00'])
@@ -42,4 +43,18 @@ describe('approval read timestamps', () => {
       expect(timestampSchema.parse(value)).toBe(value);
     });
 
+  it('supplies bounded, nonzero transfer timeout defaults', () => {
+    const minimum = { PGUSER: 'synthetic', PGPASSWORD: 'synthetic', PGDATABASE: 'synthetic',
+      DINGTALK_APP_KEY: 'synthetic', DINGTALK_APP_SECRET: 'synthetic' };
+    const config = configSchema.parse(minimum);
+    expect(config.APPROVAL_READ_API_DOWNLOAD_OPEN_TIMEOUT_MS).toBe(10000);
+    expect(config.APPROVAL_READ_API_DOWNLOAD_IDLE_TIMEOUT_MS).toBe(30000);
+    expect(config.APPROVAL_READ_API_DOWNLOAD_TOTAL_TIMEOUT_MS).toBe(300000);
+    for (const name of ['APPROVAL_READ_API_DOWNLOAD_OPEN_TIMEOUT_MS',
+      'APPROVAL_READ_API_DOWNLOAD_IDLE_TIMEOUT_MS', 'APPROVAL_READ_API_DOWNLOAD_TOTAL_TIMEOUT_MS']) {
+      expect(configSchema.safeParse({ ...minimum, [name]: 0 }).success).toBe(false);
+      expect(configSchema.safeParse({ ...minimum, [name]: 'invalid' }).success).toBe(false);
+      expect(configSchema.safeParse({ ...minimum, [name]: 3600001 }).success).toBe(false);
+    }
+  });
 });

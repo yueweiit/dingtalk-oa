@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { request as httpRequest } from 'node:http';
 import { Readable } from 'node:stream';
 import Fastify from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -34,13 +35,15 @@ afterEach(async () => { await Promise.all(apps.splice(0).map(app => app.close())
 async function setup(overrides: Partial<ReadApiDependencies> = {}, logs?: string[]) {
   const dependencies: ReadApiDependencies = {
     clients: [client], requestsPerMinute: 120,
+    downloadOpenTimeoutMs: 10000, downloadIdleTimeoutMs: 30000, downloadTotalTimeoutMs: 300000,
     approvals: vi.fn().mockResolvedValue({ items: [approval('a')], syncUntil }),
     attachments: vi.fn().mockResolvedValue({ items: [], syncUntil }),
     attachment: vi.fn().mockResolvedValue(attachment()),
     openObject: vi.fn().mockImplementation(async () => Readable.from([Buffer.from('sample')])),
     now: () => Date.parse('2026-10-29T02:00:00Z'), ...overrides,
   };
-  const app = Fastify({ logger: logs ? { stream: { write: (line: string) => { logs.push(line); } } } : false });
+  const app = Fastify({ forceCloseConnections: true,
+    logger: logs ? { stream: { write: (line: string) => { logs.push(line); } } } : false });
   apps.push(app);
   await app.register(createApprovalReadRoutes(dependencies));
   // The auth hook is encapsulated, so unrelated routes retain their previous behavior.
@@ -168,7 +171,7 @@ describe('approval archive read API', () => {
     expect(response.headers['x-content-quality']).toBe('preview');
     expect(response.headers['content-type']).toBe('application/octet-stream');
     expect(dependencies.attachment).toHaveBeenCalledWith(client, { corpId: 'corp-1', processInstanceId: 'a' }, 'file-1');
-    expect(dependencies.openObject).toHaveBeenCalledWith(item.bucket, item.objectKey);
+    expect(dependencies.openObject).toHaveBeenCalledWith(item.bucket, item.objectKey, expect.any(AbortSignal));
   });
 
   it.each([
@@ -207,6 +210,146 @@ describe('approval archive read API', () => {
     }
     expect(dependencies.approvals).not.toHaveBeenCalled();
     expect(dependencies.attachments).not.toHaveBeenCalled();
+  });
+
+  const downloadUrl = '/api/v1/attachment-content?corpId=corp-1&processInstanceId=a&fileId=file-1';
+
+  it('sanitizes asynchronous stream failures before the first byte, including automatic logs', async () => {
+    const logs: string[] = [];
+    const source = new Readable({ read() { this.destroy(new Error('PRIVATE_STORAGE_DETAIL')); } });
+    const { app } = await setup({ openObject: async () => source }, logs);
+    const response = await app.inject({ url: downloadUrl, headers: authorization });
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({ success: false, code: 'ATTACHMENT_UNAVAILABLE' });
+    expect(response.headers['content-disposition']).toBeUndefined();
+    expect(response.headers['x-content-quality']).toBeUndefined();
+    expect(source.destroyed).toBe(true);
+    expect(logs.join('')).not.toContain('PRIVATE_STORAGE_DETAIL');
+  });
+
+  it('terminates a partial download without appending JSON or logging raw stream errors', async () => {
+    const logs: string[] = [];
+    let started = false;
+    const source = new Readable({ read() {
+      if (started) return;
+      started = true;
+      this.push('first chunk');
+      setImmediate(() => this.destroy(new Error('PRIVATE_LATE_STORAGE_DETAIL')));
+    } });
+    const { app } = await setup({ openObject: async () => source }, logs);
+    await expect(app.inject({ url: downloadUrl, headers: authorization })).rejects.toThrow();
+    expect(source.destroyed).toBe(true);
+    expect(logs.join('')).not.toContain('PRIVATE_LATE_STORAGE_DETAIL');
+  });
+
+  it('aborts a stalled object open and destroys a stream returned after timeout', async () => {
+    let signal: AbortSignal | undefined;
+    let resolveOpen!: (stream: Readable) => void;
+    const { app } = await setup({ downloadOpenTimeoutMs: 20,
+      openObject: async (_bucket, _key, abort) => {
+        signal = abort;
+        return new Promise<Readable>(resolve => { resolveOpen = resolve; });
+      },
+    });
+    const response = await app.inject({ url: downloadUrl, headers: authorization });
+    expect(response.statusCode).toBe(504);
+    expect(response.json()).toEqual({ success: false, code: 'ATTACHMENT_TIMEOUT' });
+    expect(signal?.aborted).toBe(true);
+    const late = new Readable({ read() {} });
+    resolveOpen(late);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(late.destroyed).toBe(true);
+  });
+
+  it('aborts an idle stream before the first byte with a stable timeout response', async () => {
+    let signal: AbortSignal | undefined;
+    const source = new Readable({ read() {} });
+    const { app } = await setup({ downloadIdleTimeoutMs: 20,
+      openObject: async (_bucket, _key, abort) => { signal = abort; return source; } });
+    const response = await app.inject({ url: downloadUrl, headers: authorization });
+    expect(response.statusCode).toBe(504);
+    expect(response.json()).toEqual({ success: false, code: 'ATTACHMENT_TIMEOUT' });
+    expect(signal?.aborted).toBe(true);
+    expect(source.destroyed).toBe(true);
+  });
+
+  it('terminates a partial file when the source stops producing chunks', async () => {
+    let signal: AbortSignal | undefined;
+    let started = false;
+    const source = new Readable({ read() {
+      if (!started) { started = true; this.push('partial file'); }
+    } });
+    const { app } = await setup({ downloadIdleTimeoutMs: 20,
+      openObject: async (_bucket, _key, abort) => { signal = abort; return source; } });
+    await expect(app.inject({ url: downloadUrl, headers: authorization })).rejects.toThrow();
+    expect(signal?.aborted).toBe(true);
+    expect(source.destroyed).toBe(true);
+  });
+
+  it('enforces a total transfer deadline even while chunks keep resetting the idle timeout', async () => {
+    let signal: AbortSignal | undefined;
+    const source = new Readable({ read() {} });
+    let timer: NodeJS.Timeout | undefined;
+    const { app } = await setup({ downloadIdleTimeoutMs: 1000, downloadTotalTimeoutMs: 40,
+      openObject: async (_bucket, _key, abort) => {
+        signal = abort;
+        timer = setInterval(() => source.push('chunk'), 5);
+        source.once('close', () => clearInterval(timer));
+        return source;
+      } });
+    try {
+      await expect(app.inject({ url: downloadUrl, headers: authorization })).rejects.toThrow();
+      expect(signal?.aborted).toBe(true);
+      expect(source.destroyed).toBe(true);
+    } finally {
+      clearInterval(timer);
+    }
+  });
+
+  it('clears transfer deadlines when a normal download completes', async () => {
+    let signal: AbortSignal | undefined;
+    const { app } = await setup({ downloadOpenTimeoutMs: 20, downloadIdleTimeoutMs: 20, downloadTotalTimeoutMs: 30,
+      openObject: async (_bucket, _key, abort) => { signal = abort; return Readable.from(['complete']); } });
+    const response = await app.inject({ url: downloadUrl, headers: authorization });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe('complete');
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(signal?.aborted).toBe(false);
+  });
+
+  it.each(['opening', 'streaming'])('cancels storage when the HTTP caller disconnects while %s', async phase => {
+    let signal: AbortSignal | undefined;
+    let onOpened!: () => void;
+    let onAborted!: () => void;
+    const opened = new Promise<void>(resolve => { onOpened = resolve; });
+    const aborted = new Promise<void>(resolve => { onAborted = resolve; });
+    const source = new Readable({ read() {} });
+    const { app } = await setup({ openObject: async (_bucket, _key, abort) => {
+      signal = abort;
+      abort.addEventListener('abort', onAborted, { once: true });
+      onOpened();
+      if (phase === 'opening') return new Promise<Readable>(() => undefined);
+      setImmediate(() => source.push('first chunk'));
+      return source;
+    } });
+    const address = await app.listen({ host: '127.0.0.1', port: 0 });
+    const request = httpRequest(`${address}${downloadUrl}`, { headers: authorization });
+    request.on('error', () => undefined);
+    const firstChunk = new Promise<void>(resolve => request.on('response', response => {
+      response.on('error', () => undefined);
+      response.once('data', () => resolve());
+    }));
+    request.end();
+    try {
+      await opened;
+      if (phase === 'streaming') await firstChunk;
+      request.destroy();
+      await aborted;
+      expect(signal?.aborted).toBe(true);
+      if (phase === 'streaming') expect(source.destroyed).toBe(true);
+    } finally {
+      request.destroy();
+    }
   });
 
   it('enforces a per-client request quota and recovers after the window', async () => {

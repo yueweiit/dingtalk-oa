@@ -59,6 +59,9 @@ export const configSchema = z.object({
   // Service-to-service archive access; an empty client list disables the routes.
   APPROVAL_READ_API_CLIENTS_JSON: readApiClientsSchema,
   APPROVAL_READ_API_REQUESTS_PER_MINUTE: z.coerce.number().int().min(1).max(10000).default(120),
+  APPROVAL_READ_API_DOWNLOAD_OPEN_TIMEOUT_MS: z.coerce.number().int().min(100).max(120000).default(10000),
+  APPROVAL_READ_API_DOWNLOAD_IDLE_TIMEOUT_MS: z.coerce.number().int().min(100).max(300000).default(30000),
+  APPROVAL_READ_API_DOWNLOAD_TOTAL_TIMEOUT_MS: z.coerce.number().int().min(1000).max(3600000).default(300000),
 
   // Backfill
   BACKFILL_LOOKBACK_DAYS: z.coerce.number().default(1),

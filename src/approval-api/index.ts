@@ -1,9 +1,9 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import type { Readable } from 'node:stream';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { getConfig } from '../config/index.js';
-import { getArchiveMinioClient } from '../archive/minio-archive.js';
+import { openReadApiObject } from './object-store.js';
+import { AttachmentDownloadError, sendAttachmentDownload, type DownloadOptions } from './attachment-download.js';
 import {
   findReadAttachment, listReadApprovals, listReadAttachments,
   type AttachmentReadItem,
@@ -20,7 +20,10 @@ export interface ReadApiDependencies {
   approvals: typeof listReadApprovals;
   attachments: typeof listReadAttachments;
   attachment: typeof findReadAttachment;
-  openObject: (bucket: string, objectKey: string) => Promise<Readable>;
+  openObject: DownloadOptions['openObject'];
+  downloadOpenTimeoutMs: number;
+  downloadIdleTimeoutMs: number;
+  downloadTotalTimeoutMs: number;
   now: () => number;
 }
 
@@ -31,7 +34,7 @@ const downloadQuerySchema = z.object({
 }).strict();
 
 function failure(reply: FastifyReply, status: number, code: string) {
-  return reply.code(status).send({ success: false, code });
+  return reply.type('application/json; charset=utf-8').code(status).send({ success: false, code });
 }
 
 export function createApprovalReadRoutes(dependencies: ReadApiDependencies) {
@@ -47,6 +50,26 @@ export function createApprovalReadRoutes(dependencies: ReadApiDependencies) {
         req: request => ({ method: request.method, url: request.url?.split('?')[0] }),
       },
     }));
+
+    fastify.setErrorHandler((error, request, reply) => {
+      // Stream errors emitted before headers are sent also enter this handler.
+      reply.removeHeader('Content-Disposition');
+      reply.removeHeader('X-Content-Quality');
+      // Fastify copies stream headers onto ServerResponse before the first byte is written.
+      if (!reply.raw.headersSent) {
+        reply.raw.removeHeader('Content-Disposition');
+        reply.raw.removeHeader('X-Content-Quality');
+      }
+      if (error instanceof AttachmentDownloadError) {
+        return failure(reply, error.code === 'ATTACHMENT_TIMEOUT' ? 504 : 503, error.code);
+      }
+      const status = error && typeof error === 'object' && 'statusCode' in error ? error.statusCode : undefined;
+      if (typeof status === 'number' && status >= 400 && status < 500) {
+        return failure(reply, status, 'INVALID_REQUEST');
+      }
+      request.log.error({ resource: 'approval-read' }, 'Approval read API failed');
+      return failure(reply, 503, 'READ_UNAVAILABLE');
+    });
 
     fastify.addHook('onRequest', async (request, reply) => {
       reply.header('Cache-Control', 'no-store');
@@ -135,15 +158,17 @@ export function createApprovalReadRoutes(dependencies: ReadApiDependencies) {
         }, query.data.fileId);
         if (!item || item.retiredAt || item.sourceDeletedAt) return failure(reply, 404, 'ATTACHMENT_NOT_FOUND');
         if (item.archiveStatus !== 'archived') return failure(reply, 409, 'ATTACHMENT_NOT_READY');
-        const stream = await dependencies.openObject(item.bucket, item.objectKey);
-        // Always download as a file; arbitrary archived HTML/SVG must not execute on the API origin.
-        reply.type('application/octet-stream');
-        reply.header('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(item.fileName ?? item.fileId).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)}`);
-        reply.header('X-Content-Quality', item.contentQuality ?? 'unknown');
+        await sendAttachmentDownload(request, reply, item, {
+          openObject: dependencies.openObject,
+          openTimeoutMs: dependencies.downloadOpenTimeoutMs,
+          idleTimeoutMs: dependencies.downloadIdleTimeoutMs,
+          totalTimeoutMs: dependencies.downloadTotalTimeoutMs,
+        });
         request.log.info({ clientId: client.clientId, resource: 'attachment-content', corpId: item.corpId }, 'Approval read API');
-        return reply.send(stream);
-      } catch {
+        return reply;
+      } catch (error) {
         request.log.error({ clientId: client.clientId, resource: 'attachment-content' }, 'Approval attachment read failed');
+        if (error instanceof AttachmentDownloadError) throw error;
         return failure(reply, 503, 'ATTACHMENT_UNAVAILABLE');
       }
     });
@@ -164,7 +189,10 @@ export async function approvalReadRoutes(fastify: FastifyInstance): Promise<void
     approvals: listReadApprovals,
     attachments: listReadAttachments,
     attachment: findReadAttachment,
-    openObject: (bucket, key) => getArchiveMinioClient().getObject(bucket, key),
+    openObject: openReadApiObject,
+    downloadOpenTimeoutMs: config.APPROVAL_READ_API_DOWNLOAD_OPEN_TIMEOUT_MS,
+    downloadIdleTimeoutMs: config.APPROVAL_READ_API_DOWNLOAD_IDLE_TIMEOUT_MS,
+    downloadTotalTimeoutMs: config.APPROVAL_READ_API_DOWNLOAD_TOTAL_TIMEOUT_MS,
     now: Date.now,
   })(fastify);
 }
