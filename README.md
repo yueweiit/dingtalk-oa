@@ -233,6 +233,11 @@ npx tsx scripts/backfill.ts --help
 | `/health/ready` | GET | 就绪检查（DB、Token） |
 | `/metrics` | GET | 运行指标 |
 | `/webhook/approval` | POST | 钉钉 Webhook 回调（备用入口） |
+| `/api/v1/approvals` | GET | 鉴权读取完整审批，返回审批编号及表名称，支持游标分页和更新时间增量 |
+| `/api/v1/attachments` | GET | 鉴权读取附件清单、归档状态及下载路径，支持独立增量 |
+| `/api/v1/attachment-content` | GET | 鉴权后流式下载已归档附件 |
+
+其他系统接入请阅读 [审批与附件 API 调用文档](docs/modules/approval-read-api/README.md)。配置 `APPROVAL_READ_API_CLIENTS_JSON` 后启用；每个系统使用独立 Bearer Token，并限制企业及可选流程范围。默认关闭，需结合索引迁移和 HTTPS 入口部署。
 
 ## 数据流详解
 
@@ -351,6 +356,11 @@ dingtalk-oa/
 | DINGTALK_APP_KEY | 是 | - | 钉钉应用 AppKey |
 | DINGTALK_APP_SECRET | 是 | - | 钉钉应用 AppSecret |
 | DINGTALK_CORP_ID | 否 | - | 企业 ID（首次收到事件时自动获取） |
+| APPROVAL_READ_API_CLIENTS_JSON | 启用只读 HTTP API 时是 | [] | 调用系统 Token 摘要、企业白名单及可选流程白名单；空数组关闭接口 |
+| APPROVAL_READ_API_REQUESTS_PER_MINUTE | 否 | 120 | 每个应用进程每个调用系统的每分钟请求上限 |
+| APPROVAL_READ_API_DOWNLOAD_OPEN_TIMEOUT_MS | 否 | 10000 | HTTP 附件下载打开对象的超时，毫秒 |
+| APPROVAL_READ_API_DOWNLOAD_IDLE_TIMEOUT_MS | 否 | 30000 | HTTP 附件下载连续无数据的超时，毫秒 |
+| APPROVAL_READ_API_DOWNLOAD_TOTAL_TIMEOUT_MS | 否 | 300000 | HTTP 附件下载整个传输的最长时长，毫秒 |
 | DINGTALK_TEMPLATE_ADMIN_USER_ID | 模板同步时是 | - | 固定模板管理用户 ID；未配置时跳过模板同步且不标记模板删除 |
 | KAFKA_BROKERS | 否 | - | Kafka 地址（逗号分隔） |
 | KAFKA_CLIENT_ID | 否 | dingtalk-oa | Kafka 客户端 ID |
