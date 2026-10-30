@@ -233,11 +233,11 @@ npx tsx scripts/backfill.ts --help
 | `/health/ready` | GET | 就绪检查（DB、Token） |
 | `/metrics` | GET | 运行指标 |
 | `/webhook/approval` | POST | 钉钉 Webhook 回调（备用入口） |
-| `/api/v1/approvals` | GET | 鉴权读取完整审批，返回审批编号及表名称，支持游标分页和更新时间增量 |
-| `/api/v1/attachments` | GET | 鉴权读取附件清单、归档状态及下载路径，支持独立增量 |
-| `/api/v1/attachment-content` | GET | 鉴权后流式下载已归档附件 |
+| `/api/v1/approvals` | GET | 无需鉴权读取完整审批，返回审批编号及表名称，支持游标分页和更新时间增量 |
+| `/api/v1/attachments` | GET | 无需鉴权读取附件清单、归档状态及下载路径，支持独立增量 |
+| `/api/v1/attachment-content` | GET | 无需鉴权流式下载已归档附件 |
 
-其他系统接入请阅读 [审批与附件 API 调用文档](docs/modules/approval-read-api/README.md)。配置 `APPROVAL_READ_API_CLIENTS_JSON` 后启用；每个系统使用独立 Bearer Token，并限制企业及可选流程范围。默认关闭，需结合索引迁移和 HTTPS 入口部署。
+其他系统接入请阅读 [审批与附件 API 调用文档](docs/modules/approval-read-api/README.md)。三个接口无需 Token 或调用方配置，直接传 `corpId` 及可选筛选参数即可读取；能够访问接口的请求均可查询对应企业归档。既有客户端凭据配置不再生效。索引迁移与调用示例见模块文档。
 
 ## 数据流详解
 
@@ -356,8 +356,10 @@ dingtalk-oa/
 | DINGTALK_APP_KEY | 是 | - | 钉钉应用 AppKey |
 | DINGTALK_APP_SECRET | 是 | - | 钉钉应用 AppSecret |
 | DINGTALK_CORP_ID | 否 | - | 企业 ID（首次收到事件时自动获取） |
-| APPROVAL_READ_API_CLIENTS_JSON | 启用只读 HTTP API 时是 | [] | 调用系统 Token 摘要、企业白名单及可选流程白名单；空数组关闭接口 |
-| APPROVAL_READ_API_REQUESTS_PER_MINUTE | 否 | 120 | 每个应用进程每个调用系统的每分钟请求上限 |
+| APPROVAL_READ_API_REQUESTS_PER_MINUTE | 否 | 120 | 每个应用进程每个来源 IP 的每分钟请求上限，三个读取接口共用 |
+| APPROVAL_READ_API_TOTAL_REQUESTS_PER_MINUTE | 否 | 1200 | 每个应用进程每分钟的总查询请求上限，不统计无效参数或游标 |
+| APPROVAL_READ_API_CURSOR_SECRET | 否 | 从钉钉应用密钥派生 | 可选内部游标签名密钥，32–256 字符；各实例配置需一致，不用于调用鉴权 |
+| HTTP_TRUSTED_PROXIES | 否 | 空 | 可信代理 IP/CIDR 列表，逗号分隔；仅通过可信代理识别转发来源，默认忽略转发头 |
 | APPROVAL_READ_API_DOWNLOAD_OPEN_TIMEOUT_MS | 否 | 10000 | HTTP 附件下载打开对象的超时，毫秒 |
 | APPROVAL_READ_API_DOWNLOAD_IDLE_TIMEOUT_MS | 否 | 30000 | HTTP 附件下载连续无数据的超时，毫秒 |
 | APPROVAL_READ_API_DOWNLOAD_TOTAL_TIMEOUT_MS | 否 | 300000 | HTTP 附件下载整个传输的最长时长，毫秒 |
