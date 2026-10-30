@@ -1,6 +1,5 @@
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
-import type { ReadApiClient } from './config.js';
 
 export const timestampSchema = z.string().max(40).datetime({ offset: true }).refine(value => {
   const offset = /[+-](\d{2}):?(\d{2})$/.exec(value);
@@ -34,9 +33,7 @@ const positionSchema = z.object({
 export type ReadPosition = z.infer<typeof positionSchema>;
 
 const cursorSchema = z.object({
-  version: z.literal(1),
-  clientId: z.string(),
-  policy: z.string(),
+  version: z.literal(2),
   resource: z.enum(['approvals', 'attachments']),
   filters: filtersSchema,
   syncUntil: timestampSchema,
@@ -46,19 +43,12 @@ const cursorSchema = z.object({
 
 export type ReadCursor = z.infer<typeof cursorSchema>;
 
-function policyDigest(client: ReadApiClient): string {
-  return createHash('sha256').update(JSON.stringify({
-    corpIds: [...client.corpIds].sort(),
-    processCodes: client.processCodes ? [...client.processCodes].sort() : null,
-  })).digest('hex');
-}
-
-function signature(payload: string, client: ReadApiClient): Buffer {
-  return createHmac('sha256', Buffer.from(client.tokenSha256, 'hex')).update(payload).digest();
+function signature(payload: string, secret: Buffer): Buffer {
+  return createHmac('sha256', secret).update(payload).digest();
 }
 
 export function encodeCursor(
-  client: ReadApiClient,
+  secret: Buffer,
   resource: ReadResource,
   filters: ReadFilters,
   syncUntil: string,
@@ -66,15 +56,15 @@ export function encodeCursor(
   expiresAt: number,
 ): string {
   const payload = Buffer.from(JSON.stringify({
-    version: 1, clientId: client.clientId, policy: policyDigest(client),
+    version: 2,
     resource, filters, syncUntil, position, expiresAt,
   } satisfies ReadCursor)).toString('base64url');
-  return `${payload}.${signature(payload, client).toString('hex')}`;
+  return `${payload}.${signature(payload, secret).toString('hex')}`;
 }
 
 export function decodeCursor(
   value: string,
-  client: ReadApiClient,
+  secret: Buffer,
   resource: ReadResource,
   filters: ReadFilters,
   now: number,
@@ -83,12 +73,11 @@ export function decodeCursor(
   if (parts.length !== 2 || !/^[A-Za-z0-9_-]+$/.test(parts[0]) || !/^[a-f0-9]{64}$/.test(parts[1])) {
     throw new Error('INVALID_CURSOR');
   }
-  if (!timingSafeEqual(signature(parts[0], client), Buffer.from(parts[1], 'hex'))) {
+  if (!timingSafeEqual(signature(parts[0], secret), Buffer.from(parts[1], 'hex'))) {
     throw new Error('INVALID_CURSOR');
   }
   const cursor = cursorSchema.parse(JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')));
-  if (cursor.clientId !== client.clientId || cursor.policy !== policyDigest(client)
-    || cursor.resource !== resource || cursor.expiresAt <= now
+  if (cursor.resource !== resource || cursor.expiresAt <= now
     || JSON.stringify(cursor.filters) !== JSON.stringify(filters)
     || (resource === 'attachments') !== Boolean(cursor.position.fileId)) {
     throw new Error('INVALID_CURSOR');

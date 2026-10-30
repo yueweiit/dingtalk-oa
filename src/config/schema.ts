@@ -1,5 +1,13 @@
 import { z } from 'zod';
-import { readApiClientsSchema } from '../approval-api/config.js';
+import { isIP } from 'node:net';
+
+const trustedProxiesSchema = z.string().default('').transform(value => value.split(',').map(ip => ip.trim()).filter(Boolean))
+  .refine(values => values.length <= 100 && values.every(value => {
+    const [address, prefix, ...extra] = value.split('/');
+    const family = isIP(address);
+    return family !== 0 && extra.length === 0 && (prefix === undefined
+      || (/^\d+$/.test(prefix) && Number(prefix) >= 1 && Number(prefix) <= (family === 4 ? 32 : 128)));
+  }), 'must contain only explicit IPv4/IPv6 proxy addresses or CIDRs');
 
 const packingWorkbookSchema = z.object({
   year: z.number().int().min(2000).max(2200),
@@ -56,9 +64,13 @@ export const configSchema = z.object({
   WEBHOOK_TOKEN: z.string().optional(),
   WEBHOOK_AES_KEY: z.string().optional(),
 
-  // Service-to-service archive access; an empty client list disables the routes.
-  APPROVAL_READ_API_CLIENTS_JSON: readApiClientsSchema,
+  // Public archive reads; signing is internal and never requires a caller credential.
+  APPROVAL_READ_API_CURSOR_SECRET: z.preprocess(
+    value => typeof value === 'string' && !value.trim() ? undefined : value,
+    z.string().min(32).max(256).optional(),
+  ),
   APPROVAL_READ_API_REQUESTS_PER_MINUTE: z.coerce.number().int().min(1).max(10000).default(120),
+  APPROVAL_READ_API_TOTAL_REQUESTS_PER_MINUTE: z.coerce.number().int().min(1).max(1_000_000).default(1200),
   APPROVAL_READ_API_DOWNLOAD_OPEN_TIMEOUT_MS: z.coerce.number().int().min(100).max(120000).default(10000),
   APPROVAL_READ_API_DOWNLOAD_IDLE_TIMEOUT_MS: z.coerce.number().int().min(100).max(300000).default(30000),
   APPROVAL_READ_API_DOWNLOAD_TOTAL_TIMEOUT_MS: z.coerce.number().int().min(1000).max(3600000).default(300000),
@@ -123,6 +135,7 @@ export const configSchema = z.object({
 
   // 服务端口
   PORT: z.coerce.number().default(3000),
+  HTTP_TRUSTED_PROXIES: trustedProxiesSchema,
 });
 
 export type Config = z.infer<typeof configSchema>;

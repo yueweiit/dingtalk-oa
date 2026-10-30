@@ -1,8 +1,7 @@
 import type pg from 'pg';
 import { withClient } from '../pool.js';
 import type { JsonValue } from '../json-types.js';
-import type { ReadApiClient } from '../../approval-api/config.js';
-import type { ReadFilters, ReadPosition, ReadResource } from '../../approval-api/pagination.js';
+import { filtersSchema, type ReadFilters, type ReadPosition, type ReadResource } from '../../approval-api/pagination.js';
 
 export interface ApprovalReadItem {
   corpId: string;
@@ -59,7 +58,6 @@ export interface DownloadAttachment extends AttachmentReadItem {
 }
 
 export interface ReadPageRequest {
-  client: ReadApiClient;
   filters: ReadFilters;
   limit: number;
   position?: ReadPosition;
@@ -78,16 +76,12 @@ const templateName = 'COALESCE(t.name, scope.template_name)';
 const templateJoins = `LEFT JOIN public.ding_process_template t ON t.corp_id=i.corp_id AND t.process_code=i.process_code
   LEFT JOIN costing_read.financial_template_scope scope ON scope.corp_id=i.corp_id AND scope.process_code=i.process_code`;
 
-function scopeWhere(client: ReadApiClient, filters: ReadFilters) {
-  // Also guard the repository boundary; a caller cannot bypass HTTP authorization.
-  if (!client.corpIds.includes(filters.corpId)
-    || (filters.processCode && client.processCodes && !client.processCodes.includes(filters.processCode))) {
-    throw new Error('FORBIDDEN');
-  }
+function filterWhere(input: ReadFilters) {
+  // Corporate selection remains mandatory even for direct repository callers.
+  const filters = filtersSchema.parse(input);
   const values: unknown[] = [];
   const param = (value: unknown) => { values.push(value); return `$${values.length}`; };
   const conditions = [`i.corp_id=${param(filters.corpId)}`];
-  if (client.processCodes) conditions.push(`i.process_code=ANY(${param(client.processCodes)}::text[])`);
   if (filters.processCode) conditions.push(`i.process_code=${param(filters.processCode)}`);
   if (filters.processInstanceId) conditions.push(`i.process_instance_id=${param(filters.processInstanceId)}`);
   if (filters.approvalNo) conditions.push(`${approvalNumber}=${param(filters.approvalNo)}`);
@@ -130,7 +124,7 @@ async function readOnly<T>(run: (client: pg.PoolClient) => Promise<T>): Promise<
 }
 
 async function readPage<T extends pg.QueryResultRow>(resource: ReadResource, input: ReadPageRequest): Promise<ReadPage<T>> {
-  const { values, param, conditions } = scopeWhere(input.client, input.filters);
+  const { values, param, conditions } = filterWhere(input.filters);
   return readOnly(async client => {
     const syncUntil = input.syncUntil ?? (await client.query<{ syncUntil: string }>(
       `SELECT ${timestamp('clock_timestamp()')} AS "syncUntil"`,
@@ -161,9 +155,9 @@ export const listReadApprovals = (input: ReadPageRequest) => readPage<ApprovalRe
 export const listReadAttachments = (input: ReadPageRequest) => readPage<AttachmentReadItem>('attachments', input);
 
 export async function findReadAttachment(
-  client: ReadApiClient, filters: ReadFilters, fileId: string,
+  filters: ReadFilters, fileId: string,
 ): Promise<DownloadAttachment | undefined> {
-  const { values, param, conditions } = scopeWhere(client, filters);
+  const { values, param, conditions } = filterWhere(filters);
   conditions.push(`a.file_id=${param(fileId)}`);
   return readOnly(async connection => (await connection.query<DownloadAttachment>(
     `SELECT ${attachmentColumns}, a.bucket, a.object_key AS "objectKey"

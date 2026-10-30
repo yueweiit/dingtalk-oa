@@ -14,6 +14,7 @@ export async function createApp() {
   const isDev = process.env.NODE_ENV !== 'production';
 
   const fastify = Fastify({
+    trustProxy: config.HTTP_TRUSTED_PROXIES.length ? config.HTTP_TRUSTED_PROXIES : false,
     logger: {
       level: config.LOG_LEVEL,
       redact: ['req.headers.authorization', 'req.headers.cookie'],
