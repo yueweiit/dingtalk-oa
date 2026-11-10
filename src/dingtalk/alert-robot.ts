@@ -6,6 +6,7 @@ interface AccessTokenResponse {
 }
 
 interface ChatSendResponse {
+  processQueryKey?: string;
   invalidStaffIdList?: string[];
   flowControlledStaffIdList?: string[];
 }
@@ -29,6 +30,7 @@ async function getAccessToken(): Promise<string> {
   const config = requiredRobotConfig();
   const response = await fetch('https://api.dingtalk.com/v1.0/oauth2/accessToken', {
     method: 'POST',
+    signal: AbortSignal.timeout(10_000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ appKey: config.DINGTALK_ALERT_CLIENT_ID, appSecret: config.DINGTALK_ALERT_CLIENT_SECRET }),
   });
@@ -51,6 +53,7 @@ export async function sendAlertChatMessage(userIds: string[], content: string): 
   const token = await getAccessToken();
   const response = await fetch('https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend', {
     method: 'POST',
+    signal: AbortSignal.timeout(10_000),
     headers: {
       'Content-Type': 'application/json',
       'x-acs-dingtalk-access-token': token,
@@ -69,4 +72,36 @@ export async function sendAlertChatMessage(userIds: string[], content: string): 
   if (body.invalidStaffIdList?.length || body.flowControlledStaffIdList?.length) {
     throw new Error(`统一预警机器人聊天消息未完全送达: 无效用户 ${body.invalidStaffIdList?.length || 0}，限流用户 ${body.flowControlledStaffIdList?.length || 0}`);
   }
+  if (!body.processQueryKey) throw new Error('ALERT_ROBOT_PERSONAL_SEND_RESPONSE_INVALID');
+}
+
+export async function sendAlertGroupMessage(
+  conversationId: string,
+  content: string,
+  mentionUserIds: string[] = [],
+): Promise<void> {
+  if (!conversationId.trim()) throw new Error('ALERT_ROBOT_GROUP_ID_REQUIRED');
+  const atUserIds = [...new Set(mentionUserIds.map((id) => id.trim()).filter(Boolean))];
+  // 应用机器人须同时传 atUserIds 和正文 @userId 标记；不能只拼接姓名。
+  const text = atUserIds.length ? `${atUserIds.map((id) => `@${id}`).join(' ')}\n\n${content}` : content;
+  const config = requiredRobotConfig();
+  const token = await getAccessToken();
+  const response = await fetch('https://api.dingtalk.com/v1.0/robot/groupMessages/send', {
+    method: 'POST',
+    signal: AbortSignal.timeout(10_000),
+    headers: {
+      'Content-Type': 'application/json',
+      'x-acs-dingtalk-access-token': token,
+    },
+    body: JSON.stringify({
+      robotCode: config.DINGTALK_ALERT_ROBOT_CODE,
+      openConversationId: conversationId,
+      msgKey: 'sampleMarkdown',
+      msgParam: JSON.stringify({ title: '统一预警', text }),
+      ...(atUserIds.length ? { atUserIds, isAtAll: false } : {}),
+    }),
+  });
+  if (!response.ok) throw new Error(`ALERT_ROBOT_GROUP_SEND_FAILED: HTTP ${response.status}`);
+  const body = await response.json() as ChatSendResponse;
+  if (!body.processQueryKey) throw new Error('ALERT_ROBOT_GROUP_SEND_RESPONSE_INVALID');
 }
