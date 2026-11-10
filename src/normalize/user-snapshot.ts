@@ -69,6 +69,14 @@ export function computeUserHash(user: UserInfo): string {
   return crypto.createHash('sha256').update(hashInput).digest('hex').slice(0, 64);
 }
 
+export function classifyUserFetchFailure(error: unknown): { fetch_status: 'not_found' | 'failed'; fetch_error: string } {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    fetch_status: /not\s+(?:be\s+)?found/i.test(message) ? 'not_found' : 'failed',
+    fetch_error: message,
+  };
+}
+
 /**
  * 处理用户快照
  * 1. 计算用户核心字段 hash
@@ -82,25 +90,20 @@ export async function processUserSnapshot(
 ): Promise<void> {
   try {
     // 检查缓存
-    let userInfo = getCachedUser(corp_id, user_id);
+    const cached = getCachedUser(corp_id, user_id);
+    // 缓存命中意味着该响应已成功落库，不重放旧资料覆盖其他进程较新的成功快照。
+    if (cached) return;
+    let userInfo: UserInfo;
 
-    if (!userInfo) {
-      // 调用钉钉 API 获取用户信息
-      try {
-        userInfo = await getUser(user_id);
-        setCachedUser(corp_id, user_id, userInfo);
-      } catch (error: any) {
-        // 人员兜底：getUser 失败时记录失败状态，不阻断审批归档
-        console.warn(`[UserSnapshot] 获取用户信息失败: ${user_id}`, error.message);
-
-        await recordFetchFailure({
-          corp_id,
-          user_id,
-          fetch_status: error.message.includes('not found') ? 'not_found' : 'failed',
-          fetch_error: error.message,
-        });
-        return;
-      }
+    // 调用钉钉 API 获取用户信息
+    try {
+      userInfo = await getUser(user_id);
+    } catch (error: unknown) {
+      // 人员兜底：getUser 失败时只记录失败历史，不阻断审批归档。
+      const failure = classifyUserFetchFailure(error);
+      console.warn(`[UserSnapshot] 获取用户信息失败: ${user_id}`, failure.fetch_error);
+      await recordFetchFailure({ corp_id, user_id, ...failure });
+      return;
     }
 
     // 计算 hash
@@ -118,6 +121,8 @@ export async function processUserSnapshot(
       snapshot_hash,
       raw_payload: userInfo,
     });
+    // 数据库写入失败不能建立缓存，否则后续事件将无法及时重试保存。
+    setCachedUser(corp_id, user_id, userInfo);
   } catch (error) {
     console.error(`[UserSnapshot] 处理用户快照失败: ${user_id}`, error);
     // 不抛出异常，避免阻断审批归档

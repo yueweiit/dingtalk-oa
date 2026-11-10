@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { getUser, upsertSnapshot, recordFetchFailure } = vi.hoisted(() => ({
   getUser: vi.fn(),
@@ -9,7 +9,9 @@ const { getUser, upsertSnapshot, recordFetchFailure } = vi.hoisted(() => ({
 vi.mock('../dingtalk/api-client.js', () => ({ getUser }));
 vi.mock('../db/queries/user-snapshot.js', () => ({ upsertSnapshot, recordFetchFailure }));
 
-import { extractUserUnionId, processUserSnapshot } from './user-snapshot.js';
+import { classifyUserFetchFailure, extractUserUnionId, processUserSnapshot } from './user-snapshot.js';
+
+afterEach(() => vi.useRealTimers());
 
 describe('user snapshot unionId synchronization', () => {
   beforeEach(() => {
@@ -42,5 +44,37 @@ describe('user snapshot unionId synchronization', () => {
       union_id: 'union-1',
       raw_payload: expect.objectContaining({ unionid: 'union-1' }),
     }));
+  });
+
+  it('classifies the observed 60121 could-not-be-found wording without recording a failed profile', async () => {
+    getUser.mockRejectedValueOnce(new Error('oapi 错误: 60121 The user could not be found'));
+    await processUserSnapshot('corp-test', 'not-found-user');
+    expect(recordFetchFailure).toHaveBeenCalledWith(expect.objectContaining({ fetch_status: 'not_found' }));
+    expect(upsertSnapshot).not.toHaveBeenCalled();
+    expect(classifyUserFetchFailure(new Error('HTTP 500')).fetch_status).toBe('failed');
+  });
+
+  it('does not replay cached user data over a newer profile written elsewhere', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-10T00:00:00Z'));
+    getUser.mockResolvedValue({ userid: 'cache-user', name: '旧资料' });
+    await processUserSnapshot('corp-test', 'cache-user');
+    await processUserSnapshot('corp-test', 'cache-user');
+    expect(getUser).toHaveBeenCalledTimes(1);
+    expect(upsertSnapshot).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(3_600_001);
+    getUser.mockResolvedValue({ userid: 'cache-user', name: '新资料' });
+    await processUserSnapshot('corp-test', 'cache-user');
+    expect(upsertSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ name: '新资料' }));
+  });
+
+  it('retries saving after a database failure instead of caching unsaved data', async () => {
+    getUser.mockResolvedValue({ userid: 'retry-user', name: '测试资料' });
+    upsertSnapshot.mockRejectedValueOnce(new Error('database unavailable'));
+    await processUserSnapshot('corp-test', 'retry-user');
+    await processUserSnapshot('corp-test', 'retry-user');
+    expect(getUser).toHaveBeenCalledTimes(2);
+    expect(upsertSnapshot).toHaveBeenCalledTimes(2);
+    expect(recordFetchFailure).not.toHaveBeenCalled();
   });
 });

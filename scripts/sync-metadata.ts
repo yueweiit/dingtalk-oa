@@ -1,7 +1,8 @@
 import { getConfig } from '../src/config/index.js';
 import { getPool, closePool, withTransaction } from '../src/db/pool.js';
 import { listProcessTemplates, getUser, listDepartments, listUsers } from '../src/dingtalk/api-client.js';
-import { computeUserHash, extractUserUnionId } from '../src/normalize/user-snapshot.js';
+import { classifyUserFetchFailure, computeUserHash, extractUserUnionId } from '../src/normalize/user-snapshot.js';
+import { recordFetchFailure, upsertSnapshot } from '../src/db/queries/user-snapshot.js';
 import { syncDepartmentTree } from '../src/organization/department-tree-sync.js';
 import { getTemplateAdminUserId } from '../src/dingtalk/template-admin-user.js';
 
@@ -104,13 +105,14 @@ async function syncUsers(corpId: string) {
       try {
         const result = await listUsers(dept.dept_id, cursor);
         for (const user of result.list) {
-          if (user.userid && !allUsers.has(user.userid)) {
-            allUsers.set(user.userid, user);
-          } else if (user.userid) {
+          const userId = typeof user.userid === 'string' ? user.userid : '';
+          if (userId && !allUsers.has(userId)) {
+            allUsers.set(userId, user);
+          } else if (userId) {
             // 同一用户可能属于多个部门；优先保留带 unionId 的摘要数据。
-            const existing = allUsers.get(user.userid);
+            const existing = allUsers.get(userId);
             if (!extractUserUnionId(existing) && extractUserUnionId(user)) {
-              allUsers.set(user.userid, { ...existing, ...user });
+              allUsers.set(userId, { ...existing, ...user });
             }
           }
         }
@@ -134,53 +136,30 @@ async function syncUsers(corpId: string) {
   for (const [userId, userSummary] of allUsers) {
     try {
       // 用 getUser 获取完整用户信息
-      const user = await getUser(userId);
+      let user: Awaited<ReturnType<typeof getUser>>;
+      try {
+        user = await getUser(userId);
+      } catch (error) {
+        await recordFetchFailure({ corp_id: corpId, user_id: userId, ...classifyUserFetchFailure(error) });
+        failed++;
+        continue;
+      }
       const snapshotHash = computeUserHash(user);
       const userUnionId = extractUserUnionId(user);
       const unionId = userUnionId ?? extractUserUnionId(userSummary);
       // 若 unionId 只存在于用户摘要中，也写入 raw_payload，保证无独立列时仍可查询。
       const rawPayload = !userUnionId && unionId ? { ...user, unionid: unionId } : user;
 
-      const { rows: existing } = await pool.query(
-        `SELECT id, snapshot_hash, union_id FROM ding_user_snapshot
-         WHERE corp_id = $1 AND user_id = $2 AND is_current = true LIMIT 1`,
-        [corpId, userId]
-      );
-
-      if (existing.length > 0 && existing[0].snapshot_hash === snapshotHash) {
-        if (unionId && existing[0].union_id !== unionId) {
-          await pool.query(
-            `UPDATE ding_user_snapshot
-             SET union_id = $1, raw_payload = $2, updated_at = now()
-             WHERE id = $3`,
-            [unionId, JSON.stringify(rawPayload), existing[0].id]
-          );
-          unionIdsUpdated++;
-        }
+      const snapshot = await upsertSnapshot({
+        corp_id: corpId, user_id: userId, union_id: unionId,
+        name: user.name, dept_id_list: user.dept_id_list, title: user.title, avatar: user.avatar,
+        snapshot_hash: snapshotHash, raw_payload: rawPayload,
+      });
+      if (!snapshot.inserted) {
+        if (snapshot.unionIdUpdated) unionIdsUpdated++;
         skipped++;
         continue;
       }
-
-      if (existing.length > 0) {
-        await pool.query(
-          'UPDATE ding_user_snapshot SET valid_to = now(), is_current = false, updated_at = now() WHERE id = $1',
-          [existing[0].id]
-        );
-      }
-
-      await pool.query(
-        `INSERT INTO ding_user_snapshot
-           (corp_id, user_id, union_id, name, dept_id_list, title, avatar, snapshot_hash, fetch_status, raw_payload, is_current)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'success', $9, true)`,
-        [
-          corpId, userId,
-          unionId,
-          user.name || null,
-          user.dept_id_list ? JSON.stringify(user.dept_id_list) : null,
-          user.title || null, user.avatar || null,
-          snapshotHash, JSON.stringify(rawPayload),
-        ]
-      );
 
       // 回填实例表和任务表的姓名
       await pool.query(

@@ -43,7 +43,8 @@ export async function getCurrentSnapshot(
               snapshot_hash, valid_from, valid_to, is_current, fetch_status,
               fetch_error, raw_payload, updated_at
          FROM ding_user_snapshot
-       WHERE corp_id = $1 AND user_id = $2 AND is_current = true
+       WHERE corp_id = $1 AND user_id = $2 AND is_current = true AND fetch_status = 'success'
+       ORDER BY valid_from DESC, id DESC
        LIMIT 1`,
       [corp_id, user_id]
     );
@@ -64,35 +65,42 @@ export async function upsertSnapshot(params: {
   fetch_status?: string;
   fetch_error?: string | null;
   raw_payload?: any;
-}, client?: pg.PoolClient): Promise<{ inserted: boolean; snapshot: DingUserSnapshot }> {
+}, client?: pg.PoolClient): Promise<{ inserted: boolean; snapshot: DingUserSnapshot; unionIdUpdated?: boolean }> {
+  if (params.fetch_status !== undefined && params.fetch_status !== 'success') {
+    throw new Error('USER_SNAPSHOT_REQUIRES_SUCCESS');
+  }
   const run = async (c: pg.PoolClient) => {
-    const unionId = normalizeUnionId(params.union_id) ?? extractUnionId(params.raw_payload);
+    await c.query('SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))', [params.corp_id, params.user_id]);
 
     // 检查当前快照是否相同
     const current = await getCurrentSnapshot(params.corp_id, params.user_id, c);
+    const unionId = normalizeUnionId(params.union_id) ?? extractUnionId(params.raw_payload) ?? current?.union_id ?? null;
 
     if (current && current.snapshot_hash === params.snapshot_hash) {
       // unionId 可能是在旧快照中缺失，或 API 返回了新的命名形式；同步时补齐当前记录。
       if (unionId && current.union_id !== unionId) {
         const { rows } = await c.query<DingUserSnapshot>(
           `UPDATE ding_user_snapshot
-           SET union_id = $2, raw_payload = COALESCE($3, raw_payload), updated_at = now()
+           SET union_id = $2, raw_payload = COALESCE($3, raw_payload), updated_at = clock_timestamp()
            WHERE id = $1
            RETURNING *`,
           [current.id, unionId, safeJsonb(params.raw_payload)]
         );
-        return { inserted: false, snapshot: rows[0] };
+        return { inserted: false, snapshot: rows[0], unionIdUpdated: true };
       }
       return { inserted: false, snapshot: current };
     }
 
-    // 关闭旧快照
+    // 锁等待可能跨越事务开始时间；以取得锁后的同一切换时刻关闭/开启版本。
+    const { rows: times } = await c.query<{ changed_at: string }>('SELECT clock_timestamp()::text AS changed_at');
+    const changedAt = times[0].changed_at;
+    // 关闭旧成功快照，失败记录不会参与此版本链。
     if (current) {
       await c.query(
         `UPDATE ding_user_snapshot
-         SET valid_to = now(), is_current = false, updated_at = now()
+         SET valid_to = $2::timestamptz, is_current = false, updated_at = clock_timestamp()
          WHERE id = $1`,
-        [current.id]
+        [current.id, changedAt]
       );
     }
 
@@ -100,8 +108,8 @@ export async function upsertSnapshot(params: {
     const { rows } = await c.query<DingUserSnapshot>(
       `INSERT INTO ding_user_snapshot (
         corp_id, user_id, union_id, name, dept_id_list, title, avatar,
-        snapshot_hash, fetch_status, fetch_error, raw_payload
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        snapshot_hash, fetch_status, fetch_error, raw_payload, valid_from, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz, clock_timestamp())
       RETURNING *`,
       [
         params.corp_id,
@@ -112,15 +120,17 @@ export async function upsertSnapshot(params: {
         params.title ?? null,
         params.avatar ?? null,
         params.snapshot_hash,
-        params.fetch_status ?? 'success',
-        params.fetch_error ?? null,
+        'success',
+        null,
         safeJsonb(params.raw_payload),
+        changedAt,
       ]
     );
 
     return { inserted: true, snapshot: rows[0] };
   };
-  return client ? run(client) : withClient(run);
+  // 传入 client 的调用方负责已开启事务；默认入口始终包裹完整事务。
+  return client ? run(client) : withTransaction(run);
 }
 
 export async function findAnyUserId(): Promise<string | null> {
@@ -140,58 +150,50 @@ export async function recordFetchFailure(params: {
   fetch_status: string;
   fetch_error: string;
 }): Promise<void> {
+  if (!params.fetch_status || params.fetch_status === 'success') throw new Error('USER_FETCH_FAILURE_STATUS_INVALID');
   await withTransaction(async (client) => {
-    // 同一用户的失败处理串行化，避免并发重试同时插入多条当前失败记录。
+    // 与成功快照使用相同用户锁；重复失败合并计数，错误变化保留独立历史。
     await client.query(
       'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
       [params.corp_id, params.user_id]
     );
 
     const { rows } = await client.query<{
-      id: number;
+      id: string;
       fetch_status: string | null;
       fetch_error: string | null;
     }>(
       `SELECT id, fetch_status, fetch_error
-         FROM ding_user_snapshot
-        WHERE corp_id = $1 AND user_id = $2 AND is_current = true
+         FROM ding_user_fetch_failure
+        WHERE corp_id = $1 AND user_id = $2
+        ORDER BY last_failed_at DESC, id DESC
         LIMIT 1
         FOR UPDATE`,
       [params.corp_id, params.user_id]
     );
     const current = rows[0];
 
-    // 相同用户、相同失败状态和错误只更新原记录，不重复插入快照。
+    // 相同的最近错误只增加次数；失败日志不是当前用户资料状态。
     if (
       current &&
       current.fetch_status === params.fetch_status &&
       current.fetch_error === params.fetch_error
     ) {
       await client.query(
-        'UPDATE ding_user_snapshot SET updated_at = now() WHERE id = $1',
+        `UPDATE ding_user_fetch_failure
+         SET failure_count = failure_count + 1, last_failed_at = clock_timestamp(), updated_at = clock_timestamp()
+         WHERE id = $1`,
         [current.id]
       );
       return;
     }
 
-    // 错误变化，或当前是成功快照时，保留历史并生成新的失败快照。
-    if (current) {
-      await client.query(
-        `UPDATE ding_user_snapshot
-         SET valid_to = now(), is_current = false, updated_at = now()
-         WHERE id = $1`,
-        [current.id]
-      );
-    }
-
     await client.query(
-      `INSERT INTO ding_user_snapshot (
-        corp_id, user_id, name, snapshot_hash, fetch_status, fetch_error, is_current
-      ) VALUES ($1, $2, 'unknown', $3, $4, $5, true)`,
+      `INSERT INTO ding_user_fetch_failure (corp_id, user_id, fetch_status, fetch_error)
+       VALUES ($1, $2, $3, $4)`,
       [
         params.corp_id,
         params.user_id,
-        `failed_${Date.now()}`,
         params.fetch_status,
         params.fetch_error,
       ]
