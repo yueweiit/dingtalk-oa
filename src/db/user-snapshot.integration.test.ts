@@ -31,6 +31,7 @@ function sql(name: string): string {
 }
 const migration = '20261110000000_separate_user_fetch_failures';
 const validationMigration = '20261110000001_validate_user_snapshot_current';
+const cleanupMigration = '20261110000002_purge_legacy_failed_user_snapshots';
 const profile = { corp_id: 'corp-test', user_id: 'user-test', name: '测试人员', snapshot_hash: 'hash-new' };
 const failure = { corp_id: profile.corp_id, user_id: profile.user_id, fetch_status: 'not_found', fetch_error: 'synthetic user not found' };
 
@@ -205,5 +206,131 @@ describe.skipIf(!databaseUrl)('user snapshot migration and concurrency (isolated
     await upsertSnapshot({ ...profile, union_id: 'known-union' });
     expect((await admin!.query('SELECT count(*)::int AS n FROM ding_user_snapshot')).rows[0].n).toBe(1);
     expect((await getCurrentSnapshot(profile.corp_id, profile.user_id))?.union_id).toBe('known-union');
+  });
+
+  describe('legacy failure cleanup', () => {
+    const successfulRows = `INSERT INTO ding_user_snapshot
+      (corp_id,user_id,name,snapshot_hash,fetch_status,is_current,valid_from,valid_to) VALUES
+      ('corp-test','user-test','历史姓名','success-old','success',false,'2026-11-01','2026-11-02'),
+      ('corp-test','user-test','当前姓名','success-current','success',true,'2026-11-02',NULL);`;
+    beforeEach(async () => {
+      await migrateLegacy(`${successfulRows}
+        INSERT INTO ding_user_snapshot
+          (corp_id,user_id,name,union_id,snapshot_hash,fetch_status,fetch_error,is_current,valid_from,raw_payload) VALUES
+          ('corp-test','user-test','unknown','legacy-union','legacy-failed','failed','synthetic error',true,'2026-11-03','{"code":60121}'),
+          ('corp-other','user-test','unknown',NULL,'legacy-null',NULL,NULL,true,'2026-11-04',NULL),
+          ('corp-test','never-succeeded','unknown',NULL,'legacy-blank','','',true,'2026-11-05',NULL),
+          ('corp-test','missing-user','unknown',NULL,'legacy-not-found','not_found','synthetic not found',true,'2026-11-06',NULL);`);
+      await admin!.query(sql(validationMigration));
+    });
+
+    async function runCleanup(afterCleanupSql?: string) {
+      await admin!.query('BEGIN');
+      try {
+        await admin!.query(sql(cleanupMigration));
+        if (afterCleanupSql) await admin!.query(afterCleanupSql);
+        await admin!.query('COMMIT');
+      }
+      catch (error) { await admin!.query('ROLLBACK'); throw error; }
+    }
+    async function expectRejectedCleanup(error: string | { code: string }, afterCleanupSql?: string) {
+      const before = (await admin!.query(`SELECT to_jsonb(s) AS payload FROM ding_user_snapshot s ORDER BY id`)).rows;
+      const errorsBefore = (await admin!.query(`SELECT to_jsonb(f) AS payload FROM ding_user_fetch_failure f ORDER BY id`)).rows;
+      await expect(runCleanup(afterCleanupSql)).rejects.toMatchObject(typeof error === 'string' ? { message: error } : error);
+      expect((await admin!.query(`SELECT to_jsonb(s) AS payload FROM ding_user_snapshot s ORDER BY id`)).rows).toEqual(before);
+      expect((await admin!.query(`SELECT to_jsonb(f) AS payload FROM ding_user_fetch_failure f ORDER BY id`)).rows).toEqual(errorsBefore);
+      expect((await admin!.query(`SELECT 1 FROM information_schema.columns
+        WHERE table_schema=$1 AND table_name='ding_user_fetch_failure' AND column_name='source_snapshot_payload'`, [schema])).rows).toEqual([]);
+    }
+
+    it('moves complete failed rows into the error archive and preserves every successful version and error counter', async () => {
+      await admin!.query(`UPDATE ding_user_fetch_failure SET failure_count=7, last_failed_at=last_failed_at + interval '1 second'
+        WHERE fetch_error='synthetic error'`);
+      const failed = (await admin!.query(`SELECT id,to_jsonb(s) AS payload FROM ding_user_snapshot s
+        WHERE fetch_status IS DISTINCT FROM 'success' ORDER BY id`)).rows;
+      const successful = (await admin!.query(`SELECT to_jsonb(s) AS payload FROM ding_user_snapshot s
+        WHERE fetch_status='success' ORDER BY id`)).rows;
+      const counters = (await admin!.query(`SELECT id,failure_count,first_failed_at,last_failed_at FROM ding_user_fetch_failure ORDER BY id`)).rows;
+      await runCleanup();
+      expect((await admin!.query(`SELECT to_jsonb(s) AS payload FROM ding_user_snapshot s ORDER BY id`)).rows).toEqual(successful);
+      const archived = (await admin!.query(`SELECT source_snapshot_id AS id,source_snapshot_payload AS payload
+        FROM ding_user_fetch_failure ORDER BY source_snapshot_id`)).rows;
+      expect(archived).toEqual(failed);
+      expect((await admin!.query(`SELECT id,failure_count,first_failed_at,last_failed_at FROM ding_user_fetch_failure ORDER BY id`)).rows).toEqual(counters);
+      expect((await getCurrentSnapshot('corp-test', 'user-test'))?.name).toBe('当前姓名');
+      expect(await getCurrentSnapshot('corp-test', 'never-succeeded')).toBeNull();
+    });
+
+    it('refuses cleanup if even one legacy failure has no archived counterpart', async () => {
+      await admin!.query(`DELETE FROM ding_user_fetch_failure WHERE fetch_error='synthetic error'`);
+      await expectRejectedCleanup('USER_SNAPSHOT_CLEANUP_ARCHIVE_MISMATCH');
+    });
+
+    it('rolls back deleted rows, archive payloads and the new column when the transaction fails after cleanup', async () => {
+      // 模拟迁移登记前的后续语句失败；若清理中途提交，原行及新增列将无法回滚。
+      await expectRejectedCleanup({ code: '22012' }, 'SELECT 1 / 0');
+    });
+
+    it.each([
+      "corp_id='different-corp'", "user_id='different-user'", "fetch_status='different_status'",
+      "fetch_error='different error'", "first_failed_at=first_failed_at - interval '1 second'",
+    ])('refuses mismatched archive data (%s) without deleting any row', async (change) => {
+      await admin!.query(`UPDATE ding_user_fetch_failure SET ${change} WHERE fetch_error='synthetic error'`);
+      await expectRejectedCleanup('USER_SNAPSHOT_CLEANUP_ARCHIVE_MISMATCH');
+    });
+
+    it.each(['NO ACTION', 'CASCADE', 'SET NULL'])('refuses inbound foreign keys including ON DELETE %s without modifying dependents', async action => {
+      await admin!.query(`CREATE TABLE "${schema}".cleanup_reference
+        (snapshot_id bigint REFERENCES "${schema}".ding_user_snapshot(id) ON DELETE ${action});
+        INSERT INTO "${schema}".cleanup_reference SELECT id FROM ding_user_snapshot WHERE snapshot_hash='legacy-failed'`);
+      try {
+        const dependents = (await admin!.query(`SELECT * FROM "${schema}".cleanup_reference`)).rows;
+        await expectRejectedCleanup('USER_SNAPSHOT_CLEANUP_REFERENCES_EXIST');
+        expect((await admin!.query(`SELECT * FROM "${schema}".cleanup_reference`)).rows).toEqual(dependents);
+      } finally { await admin!.query(`DROP TABLE "${schema}".cleanup_reference`); }
+    });
+
+    it.each(['ding_user_snapshot', 'ding_user_fetch_failure'])('refuses custom triggers on %s', async table => {
+      await admin!.query(`CREATE FUNCTION "${schema}".cleanup_custom_writer() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN OLD; END $$;
+        CREATE TRIGGER cleanup_custom_writer BEFORE UPDATE OR DELETE ON "${schema}".${table}
+        FOR EACH ROW EXECUTE FUNCTION "${schema}".cleanup_custom_writer()`);
+      try { await expectRejectedCleanup('USER_SNAPSHOT_CLEANUP_CUSTOM_WRITERS_EXIST'); }
+      finally {
+        await admin!.query(`DROP TRIGGER cleanup_custom_writer ON "${schema}".${table}; DROP FUNCTION "${schema}".cleanup_custom_writer()`);
+      }
+    });
+
+    it('refuses delete rules that could silently skip or redirect cleanup', async () => {
+      await admin!.query(`CREATE RULE cleanup_skip_delete AS ON DELETE TO "${schema}".ding_user_snapshot DO INSTEAD NOTHING`);
+      try { await expectRejectedCleanup('USER_SNAPSHOT_CLEANUP_CUSTOM_WRITERS_EXIST'); }
+      finally { await admin!.query(`DROP RULE cleanup_skip_delete ON "${schema}".ding_user_snapshot`); }
+    });
+
+    it('requires the previous validation stage before removing any historical row', async () => {
+      await admin!.query(`ALTER TABLE ding_user_snapshot DROP CONSTRAINT user_snapshot_current_success;
+        ALTER TABLE ding_user_snapshot ADD CONSTRAINT user_snapshot_current_success
+        CHECK (NOT is_current OR (fetch_status IS NOT DISTINCT FROM 'success' AND valid_to IS NULL)) NOT VALID`);
+      await expectRejectedCleanup('USER_SNAPSHOT_CLEANUP_REQUIRES_VALIDATED_CONSTRAINT');
+    });
+
+    it('allows an already clean success-only table without manufacturing failure records', async () => {
+      await admin!.query(`TRUNCATE "${schema}".ding_user_snapshot, "${schema}".ding_user_fetch_failure`);
+      await migrateLegacy(successfulRows);
+      await admin!.query(sql(validationMigration));
+      await runCleanup();
+      expect((await admin!.query('SELECT count(*)::int AS n FROM ding_user_snapshot')).rows[0].n).toBe(2);
+      expect((await admin!.query('SELECT count(*)::int AS n FROM ding_user_fetch_failure')).rows[0].n).toBe(0);
+    });
+
+    it('keeps normal profile and failure writes compatible after cleanup', async () => {
+      await runCleanup();
+      await upsertSnapshot(profile);
+      await recordFetchFailure(failure);
+      expect((await getCurrentSnapshot(profile.corp_id, profile.user_id))?.snapshot_hash).toBe(profile.snapshot_hash);
+      const errors = (await admin!.query(`SELECT source_snapshot_id,source_snapshot_payload FROM ding_user_fetch_failure
+        WHERE fetch_error=$1`, [failure.fetch_error])).rows;
+      expect(errors).toEqual([{ source_snapshot_id: null, source_snapshot_payload: null }]);
+      expect((await admin!.query(`SELECT 1 FROM ding_user_snapshot WHERE fetch_status IS DISTINCT FROM 'success'`)).rows).toEqual([]);
+    });
   });
 });

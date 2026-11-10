@@ -7,6 +7,7 @@ const require = createRequire(import.meta.url);
 const Builder = require('node-pg-migrate/dist/migrationBuilder').default;
 const migration = require('../../migrations/20261110000000_separate_user_fetch_failures.cjs');
 const validation = require('../../migrations/20261110000001_validate_user_snapshot_current.cjs');
+const cleanup = require('../../migrations/20261110000002_purge_legacy_failed_user_snapshots.cjs');
 function build(direction: 'up' | 'down' = 'up', definition = migration) {
   const builder = new Builder({ query: () => { throw new Error('DATABASE_ACCESS_NOT_ALLOWED'); } }, undefined, false, console);
   definition[direction](builder);
@@ -84,5 +85,74 @@ describe('user snapshot migration and writer contract (no database)', () => {
     expect(source).toContain('await upsertSnapshot(');
     expect(source).toContain('await recordFetchFailure(');
     expect(source).not.toMatch(/(?:INSERT INTO|UPDATE) ding_user_snapshot/);
+  });
+});
+
+describe('legacy failed user snapshot cleanup safety contract (no database)', () => {
+  it('uses one transaction and bounded locks before checking or modifying data', () => {
+    const { sql, transactional } = build('up', cleanup);
+    expect(transactional).toBe(true);
+    expect(sql.indexOf("SET LOCAL lock_timeout = '5s'")).toBeLessThan(sql.indexOf('LOCK TABLE'));
+    expect(sql).toContain("SET LOCAL statement_timeout = '5min'");
+    expect(sql).toContain('LOCK TABLE public.ding_user_snapshot, public.ding_user_fetch_failure IN SHARE ROW EXCLUSIVE MODE');
+    expect(sql).not.toMatch(/\bCOMMIT\b|\bCASCADE\s*;/i);
+  });
+
+  it('refuses missing validation, foreign keys, or custom write side effects before archiving', () => {
+    const { sql } = build('up', cleanup);
+    for (const code of ['REQUIRES_VALIDATED_CONSTRAINT', 'REFERENCES_EXIST', 'CUSTOM_WRITERS_EXIST', 'ARCHIVE_MISMATCH']) {
+      expect(sql.indexOf(`USER_SNAPSHOT_CLEANUP_${code}`)).toBeGreaterThan(-1);
+      expect(sql.indexOf(`USER_SNAPSHOT_CLEANUP_${code}`)).toBeLessThan(sql.indexOf('ADD "source_snapshot_payload"'));
+    }
+    expect(sql).toContain("confrelid = 'public.ding_user_snapshot'::regclass AND contype = 'f'");
+    expect(sql).toContain('AND NOT tgisinternal');
+    expect(sql).toContain("AND rulename <> '_RETURN'");
+  });
+
+  it('requires a matching archive by identity, normalized error and failure time, not only counts', () => {
+    const { sql } = build('up', cleanup);
+    for (const field of ['corp_id', 'user_id']) expect(sql).toContain(`f.${field} IS DISTINCT FROM s.${field}`);
+    expect(sql).toContain("f.fetch_status IS DISTINCT FROM COALESCE(NULLIF(s.fetch_status, ''), 'failed')");
+    expect(sql).toContain("f.fetch_error IS DISTINCT FROM COALESCE(s.fetch_error, 'USER_FETCH_FAILED')");
+    expect(sql).toContain('f.first_failed_at IS DISTINCT FROM s.valid_from');
+    expect(sql).toContain('f.id IS NULL');
+  });
+
+  it('archives each full row before deleting only matching noncurrent failures and preserves counters', () => {
+    const { sql } = build('up', cleanup);
+    expect(sql.indexOf('SET source_snapshot_payload = to_jsonb(s)')).toBeLessThan(sql.indexOf('DELETE FROM'));
+    const deletion = sql.slice(sql.indexOf('DELETE FROM'), sql.indexOf('DO $verify$'));
+    expect(deletion).toContain("s.is_current = false AND s.fetch_status IS DISTINCT FROM 'success'");
+    expect(deletion).toContain('f.source_snapshot_payload = to_jsonb(s)');
+    expect(deletion).toContain('f.corp_id = s.corp_id AND f.user_id = s.user_id');
+    expect(sql).toContain('USER_SNAPSHOT_CLEANUP_INCOMPLETE');
+    expect(sql).not.toMatch(/\bDELETE FROM public\.ding_user_fetch_failure|\bTRUNCATE\b|\bDROP\s+TABLE\b/i);
+    expect(sql).not.toMatch(/SET\s+(?:failure_count|last_failed_at|first_failed_at)\s*=/i);
+  });
+
+  it('refuses automatic rollback rather than guessing how to reinsert historical rows', () => {
+    expect(build('down', cleanup).sql).toContain('USER_SNAPSHOT_CLEANUP_MANUAL_ROLLBACK_REQUIRED');
+  });
+
+  it('previews only the explicitly named cleanup despite a mixed and out-of-order legacy migration history', async () => {
+    const { runner } = require('node-pg-migrate');
+    const queries: string[] = [];
+    const dbClient = { async query(sql: string) {
+      queries.push(sql);
+      if (sql.includes('pg_try_advisory_lock')) return { rows: [{ lockObtained: true }] };
+      if (sql.includes('pg_advisory_unlock')) return { rows: [{ lockReleased: true }] };
+      if (sql.includes('information_schema.tables')) return { rows: [{ table_name: 'pgmigrations' }] };
+      if (sql.includes('information_schema.table_constraints')) return { rows: [{ constraint_name: 'pgmigrations_pkey' }] };
+      if (sql.startsWith('SELECT name FROM')) return { rows: [{ name: '20260703000000_create_ding_process_template' }] };
+      return { rows: [] };
+    } };
+    const name = '20261110000002_purge_legacy_failed_user_snapshots';
+    const result = await runner({ dbClient, dir: fileURLToPath(new URL('../../migrations', import.meta.url)),
+      file: name, direction: 'up', schema: 'public', migrationsTable: 'pgmigrations',
+      checkOrder: false, singleTransaction: true, dryRun: true,
+      logger: { info() {}, debug() {}, warn() {}, error() {} },
+    });
+    expect(result.map((item: { name: string }) => item.name)).toEqual([name]);
+    expect(queries.some(sql => /\b(?:CREATE|ALTER|DELETE|UPDATE|INSERT)\b/i.test(sql))).toBe(false);
   });
 });
