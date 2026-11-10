@@ -36,6 +36,32 @@
 
 2026-11-10 验证：项目类型检查、手工同步脚本独立类型检查已通过；用户写入/规范化、迁移离线生成、迁移器两种 singleTransaction 执行路径、组织、人员名视图及超时提醒共 73 项单元测试通过（迁移回归 9 项，其他相关回归 64 项）。[11 项 PostgreSQL 集成用例](../../../src/db/user-snapshot.integration.test.ts) 需要显式获准的 USER_SNAPSHOT_TEST_DATABASE_URL，限定 loopback 与 user_snapshot_test / user_snapshot_test_* 数据库，在独立随机 schema 验证真实迁移、重复成功版本区间、早结束时间保留、时间并列、企业隔离、开放读事务下的约束校验及重试、并发、回滚和约束；本次未提供获准隔离库，全部跳过。实际数据库迁移和多进程运行仍待验证。
 
+### 旧失败快照的独立清理
+
+前两阶段保留旧失败原行是既定行为。需要让 `ding_user_snapshot` 仅保留成功资料及其历史版本时，另执行 [清理迁移](../../../migrations/20261110000002_purge_legacy_failed_user_snapshots.cjs)，不能修改或重跑已登记的第一阶段。它要求前一阶段的 `user_snapshot_current_success` 已完成校验，在一个事务中锁定快照和失败表，逐行核对 source_snapshot_id、企业、用户、规范化后的错误状态/文本和首次失败时间。任何归档缺失、内容不符或异常失败 current 都会中止，不能只根据两个表的行数差判断可删范围。
+
+删除前将旧失败原行完整保存到 `ding_user_fetch_failure.source_snapshot_payload`（JSONB），包括原技术 ID、原始 payload、资料字段和版本时间；source_snapshot_id 保留为历史来源标识，不是外键。随后仅删除非 current、非 success、且完整 JSON 与归档一致的旧快照。成功资料所有版本、失败历史、已有 failure_count 和失败时间均保留；新失败记录的 source_snapshot_id / source_snapshot_payload 仍为空。原失败记录不再留在快照表，但可以从失败表追溯原行；此清理不是擦除错误历史。
+
+仓库中的人员显示按企业、用户及成功状态关联，未发现按快照行 ID 引用的业务外键。迁移仍会检查实际数据库：任何指向快照表的外键（包括 CASCADE / SET NULL），或任一目标表的自定义触发器、规则都会中止，须人工核查；未声明为外键的外部系统引用不能由数据库自动发现。表锁防止核查后并发写入或新建引用；新增 JSONB 列需要排他锁，因此应备份并安排读写维护窗口，暂停应用实例和用户同步脚本。锁等待上限 5 秒、单语句上限 5 分钟，错误会回滚整个清理阶段。down 明确拒绝自动恢复，人工恢复应从备份及完整 JSON 制定方案。
+
+仓库存在混合迁移前缀，已部署库须精确指定本文件预览，避免全量补跑其他历史迁移：
+
+```bash
+npm run migrate:up -- 20261110000002_purge_legacy_failed_user_snapshots --no-check-order --dry-run
+```
+
+dry-run 仅生成 SQL，不会实际执行完整性/引用检查。正式执行须先获得生产清理授权、完成备份并暂停写入，再使用相同命令去掉 `--dry-run`；`--no-check-order` 仅限明确指定本文件，不用于全量迁移。完成后可只读检查：
+
+```sql
+SELECT count(*) AS remaining_failed_snapshots
+FROM public.ding_user_snapshot
+WHERE fetch_status IS DISTINCT FROM 'success';
+```
+
+预期为 0；不应据快照行数推算用户人数，也不应据失败历史行数推算真实累计失败次数。
+
+2026-11-10 清理验证：项目类型检查及快照写入/规范化、人员视图、迁移安全契约共 37 项离线测试通过。用户快照隔离库测试共 28 项（其中清理新增 17 项），覆盖完整原行归档、成功历史保留、归档缺失/错配、删除后事务失败的整阶段回滚、CASCADE / SET NULL 外键、触发器/规则拦截、前置校验、空失败集合和清理后的正常写入；未提供获准测试库，28 项均跳过。本次未连接生产数据库、执行清理或验证真实 SQL 执行效果。
+
 ## 部门树
 
 [buildDepartmentTreeRows](../../../src/organization/department-tree.ts) 从部门 1 的 ROOT 开始，根据父子边构造 pathIds/pathNames；无法找到父部门时抛错。[syncDepartmentTree](../../../src/organization/department-tree-sync.ts) upsert 本轮部门，其他原 current 行改为 false；手工同步脚本在事务中调用它。

@@ -16,7 +16,7 @@ PostgreSQL + `pg` 原生参数化 SQL，没有 ORM。[连接池](../../src/db/po
 | public.ding_approval_instance / ding_approval_task | 实例企业+实例 ID 唯一；任务企业+实例 ID+任务 ID 唯一；基础迁移未声明二者外键 | [实例](../../migrations/20260703000001_create_ding_approval_instance.cjs)、[任务](../../migrations/20260703000002_create_ding_approval_task.cjs) |
 | public.ding_form_field | 企业+模板+字段 ID 唯一，保存字段元数据而非实例明细台账 | [字段迁移](../../migrations/20260703000004_create_ding_form_field.cjs) |
 | public.ding_user_snapshot / ding_department_tree | 人员成功资料版本及当前标志、部门父子与 JSONB 路径；快照 current 按企业+用户部分唯一且必须成功、valid_to 为空；union_id 由后续迁移加入 | [用户](../../migrations/20260703000003_create_ding_user_snapshot.cjs)、[当前唯一与失败分离](../../migrations/20261110000000_separate_user_fetch_failures.cjs)、[部门](../../migrations/20260722000000_create_ding_department_tree.cjs)、[unionId](../../migrations/20260914000000_add_union_id_to_user_snapshot.cjs) |
-| public.ding_user_fetch_failure | 独立失败历史及次数；source_snapshot_id 唯一关联迁移前的失败行，最近错误按企业+用户+时间索引查询；无 current 语义 | [迁移](../../migrations/20261110000000_separate_user_fetch_failures.cjs)、[人员规则](../modules/metadata-organization/README.md#用户快照与失败记录) |
+| public.ding_user_fetch_failure | 独立失败历史及次数；source_snapshot_id 唯一标识迁移前失败来源，清理后 source_snapshot_payload 保存完整原行 JSON；最近错误按企业+用户+时间索引查询，无 current 语义 | [失败分离](../../migrations/20261110000000_separate_user_fetch_failures.cjs)、[旧失败清理](../../migrations/20261110000002_purge_legacy_failed_user_snapshots.cjs)、[人员规则](../modules/metadata-organization/README.md#用户快照与失败记录) |
 | public.ding_corp_config | 已知活跃企业；主进程还会确保表存在 | [迁移](../../migrations/20260703000007_create_ding_corp_config.cjs)、[查询](../../src/db/queries/corp-config.ts) |
 | public.ding_event_log / ding_event_outbox | 处理审计与可靠投递分离；日志 event_id 非空时企业内去重，outbox 企业+事件 ID 唯一 | [日志](../../migrations/20260703000006_create_ding_event_log.cjs)、[outbox](../../migrations/20260806000001_create_ding_event_outbox.cjs) |
 | public.backfill_cursor | 企业+模板+起止窗口唯一；普通补录计数 | [游标迁移](../../migrations/20260703000005_create_backfill_cursor.cjs) |
@@ -66,3 +66,5 @@ erDiagram
 财务范围与投影的 down 明确抛错以保留审计证据。时间修正迁移会改历史数据，不能作为文档检查执行。迁移、回滚、角色配置必须在获准的独立实施任务中处理。
 
 用户失败分离采用 [第一阶段](../../migrations/20261110000000_separate_user_fetch_failures.cjs) 复制失败历史、按下一成功版本生效时间修复重叠区间、恢复最后成功资料，并添加唯一索引及 NOT VALID CHECK；[第二阶段](../../migrations/20261110000001_validate_user_snapshot_current.cjs) 打断迁移器合并事务后独立校验 CHECK。两阶段均限制锁等待 5 秒、单语句 5 分钟。第一阶段添加约束仍会短暂阻塞读取，须安排读写维护窗口；第二阶段失败不回滚第一阶段，排查后可重试校验。原行保留，两阶段均拒绝自动 down。本次未执行，完整步骤见 [人员迁移说明](../modules/metadata-organization/README.md#用户快照与失败记录)。
+
+[独立清理阶段](../../migrations/20261110000002_purge_legacy_failed_user_snapshots.cjs) 要求前置 CHECK 已校验，逐行核对失败归档与引用关系，将旧失败原行完整保存到失败表的 source_snapshot_payload 后才从快照表删除；保留所有成功版本及失败次数，不更改前两阶段。任何归档缺失、错配、入站外键或自定义触发器/规则均中止，整体事务回滚；down 拒绝自动恢复。生产执行需要独立授权、备份和读写维护窗口；只准备代码不代表已清理。精确按名称预览及验证步骤见 [清理说明](../modules/metadata-organization/README.md#旧失败快照的独立清理)。
