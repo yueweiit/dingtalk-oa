@@ -8,7 +8,14 @@ export interface AlertDeliveryKey {
   recipientUserId: string;
 }
 
-export async function claimAlertDelivery(key: AlertDeliveryKey, payload: Record<string, unknown>): Promise<boolean> {
+export async function claimAlertDelivery(
+  key: AlertDeliveryKey,
+  payload: Record<string, unknown>,
+  repeatAfterMinutes?: number,
+): Promise<boolean> {
+  if (repeatAfterMinutes !== undefined && (!Number.isSafeInteger(repeatAfterMinutes) || repeatAfterMinutes <= 0)) {
+    throw new Error('ALERT_INVALID_REPEAT_INTERVAL');
+  }
   return withClient(async (client) => {
     const { rowCount } = await client.query(
       `INSERT INTO ding_alert_notification (
@@ -24,7 +31,10 @@ export async function claimAlertDelivery(key: AlertDeliveryKey, payload: Record<
          updated_at = now()
        WHERE ding_alert_notification.status = 'failed'
           OR (ding_alert_notification.status = 'sending'
-              AND ding_alert_notification.updated_at < now() - interval '15 minutes')`,
+               AND ding_alert_notification.updated_at < now() - interval '15 minutes')
+           OR (ding_alert_notification.status = 'sent'
+               AND $7::integer IS NOT NULL
+               AND ding_alert_notification.sent_at <= now() - make_interval(mins => $7::integer))`,
       [
         key.corpId,
         key.processInstanceId,
@@ -32,6 +42,7 @@ export async function claimAlertDelivery(key: AlertDeliveryKey, payload: Record<
         key.alertPhase,
         key.recipientUserId,
         JSON.stringify(payload),
+        repeatAfterMinutes ?? null,
       ]
     );
     return rowCount === 1;

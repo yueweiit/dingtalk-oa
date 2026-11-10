@@ -44,7 +44,17 @@ export async function upsertTask(params: {
         approver_dept_id = COALESCE(EXCLUDED.approver_dept_id, ding_approval_task.approver_dept_id),
         approver_dept_name = COALESCE(EXCLUDED.approver_dept_name, ding_approval_task.approver_dept_name),
         start_time = COALESCE(EXCLUDED.start_time, ding_approval_task.start_time),
-        end_time = COALESCE(EXCLUDED.end_time, ding_approval_task.end_time),
+        end_time = CASE
+          WHEN UPPER(COALESCE(EXCLUDED.status, '')) = 'RUNNING'
+            AND EXCLUDED.end_time IS NULL
+            AND EXCLUDED.start_time >= ding_approval_task.end_time
+            AND (ding_approval_task.start_time IS NULL
+              OR EXCLUDED.start_time > ding_approval_task.start_time
+              OR (EXCLUDED.start_time = ding_approval_task.start_time
+                AND EXCLUDED.start_time > ding_approval_task.end_time))
+          THEN NULL
+          ELSE COALESCE(EXCLUDED.end_time, ding_approval_task.end_time)
+        END,
         remark = COALESCE(EXCLUDED.remark, ding_approval_task.remark),
         raw_payload = COALESCE(EXCLUDED.raw_payload, ding_approval_task.raw_payload),
         updated_at = now()

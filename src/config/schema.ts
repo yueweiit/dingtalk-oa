@@ -112,14 +112,16 @@ export const configSchema = z.object({
   PACKING_SHEET_MAX_ROWS: z.coerce.number().int().min(1).max(10_000).default(5000),
   PACKING_SHEET_MAX_COLUMNS: z.coerce.number().int().min(1).max(200).default(100),
 
-  // 统一预警机器人。未配置流程码或接收人时，监控任务只记录跳过，不发送消息。
+  // 超时提醒发给任务审批人；固定接收人仅用于预算和空节点预警。
   DINGTALK_ALERT_ROBOT_CODE: z.string().trim().min(1).optional(),
   DINGTALK_ALERT_CLIENT_ID: z.string().trim().min(1).optional(),
   DINGTALK_ALERT_CLIENT_SECRET: z.string().trim().min(1).optional(),
   DINGTALK_ALERT_RECIPIENT_USER_IDS: z.string().default(''),
   APPROVAL_TIMEOUT_PROCESS_CODES: z.string().default(''),
+  APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS: z.string().default(''),
   APPROVAL_TIMEOUT_MONITOR_CRON: z.string().default('*/30 * * * *'),
-  APPROVAL_TIMEOUT_MINUTES: z.coerce.number().int().min(1).default(24 * 60),
+  APPROVAL_TIMEOUT_MINUTES: z.coerce.number().int().min(1).default(72 * 60),
+  // 保留旧配置兼容环境变量；每日提醒不再使用前后窗口。
   APPROVAL_TIMEOUT_WINDOW_BEFORE_MINUTES: z.coerce.number().int().min(1).default(40),
   APPROVAL_TIMEOUT_WINDOW_AFTER_MINUTES: z.coerce.number().int().min(1).default(40),
   APPROVAL_EMPTY_NODE_PROCESS_CODES: z.string().default(''),
