@@ -17,6 +17,8 @@
 
 钉钉审批详情明确返回 HTTP 400 和 `processInstanceIdError` 时，该企业和实例在定时核对中进入冷却。`APPROVAL_STATUS_RECONCILE_INVALID_ID_COOLDOWN_MINUTES` 默认 `1440`。日志记录下次可核对的时间，冷却到期后按现有顺序重新选入批次。网络错误、限流和其他返回码保持现有重试行为。冷却只影响定时核对，审批状态、正常事件归档和超时提醒各自沿用原有规则。[核对实现](../../../src/jobs/approval-status-reconcile.ts) · [候选查询](../../../src/db/queries/approval-instance.ts)
 
+钉钉应用 Token 刷新和审批详情每次 HTTP 请求最多等待 10 秒，包含响应正文读取。详情超时沿用原有重试次数，Token 刷新超时可回退到仍有效的旧 Token。单条最终超时按临时失败记录，该实例仍可参加后续核对，同批次其余实例继续执行。[Token 刷新](../../../src/dingtalk/token-manager.ts) · [详情请求](../../../src/dingtalk/api-client.ts)
+
 ## 普通补录细节
 
 [runBackfill](../../../src/jobs/backfill.ts) 默认按企业配置表取企业，指定 process_code 时直接处理该流程；未指定则使用 [findBackfillTemplates](../../../src/db/queries/process-template.ts)，包括注册的财务历史范围。实例间默认 500ms，翻页 1000ms，窗口间 2000ms。

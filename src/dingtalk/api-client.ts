@@ -63,6 +63,7 @@ interface ApiCallOptions {
   retries?: number;
   usageName?: string;
   validate?: (data: Record<string, unknown>) => void;
+  timeoutMs?: number;
 }
 
 class DingTalkApiError extends Error {
@@ -88,21 +89,26 @@ function invalidInstanceResponse(responseText: string): boolean {
 }
 
 async function apiCall<T>(endpoint: string, options: ApiCallOptions = {}): Promise<T> {
-  const { method = 'GET', body, retries = 1, usageName = endpoint.split('?', 1)[0], validate } = options;
+  const { method = 'GET', body, retries = 1, usageName = endpoint.split('?', 1)[0], validate, timeoutMs } = options;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     await rateLimiter.acquire();
     const token = await tokenManager.getToken();
     try {
+      const signal = timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs);
       const response = await fetch(`${BASE_URL}${endpoint}`, {
         method,
+        signal,
         headers: {
           'Content-Type': 'application/json',
           'x-acs-dingtalk-access-token': token,
         },
         body: body ? JSON.stringify(body) : undefined,
       });
-      const responseText = await response.text().catch(() => '');
+      const responseText = await response.text().catch(() => {
+        signal?.throwIfAborted();
+        return '';
+      });
       if (!response.ok) {
         if (response.status === 401) tokenManager.clearToken();
         const message = `API 调用失败: ${usageName} HTTP ${response.status} ${responseText}`;
@@ -295,6 +301,7 @@ export async function getInstance(
 ): Promise<ApprovalInstanceDetail> {
   const data = await apiCall<unknown>(`${PROCESS_INSTANCE_ENDPOINT}?processInstanceId=${encodeURIComponent(processInstanceId)}`, {
     retries: options.retries,
+    timeoutMs: 10_000,
   });
 
   const parsed = getInstanceResponseSchema.parse(data);

@@ -38,7 +38,7 @@ class TokenManager {
 
     try {
       const url = `https://oapi.dingtalk.com/gettoken?appkey=${config.DINGTALK_APP_KEY}&appsecret=${config.DINGTALK_APP_SECRET}`;
-      const response = await fetch(url, { method: 'GET' });
+      const response = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(10_000) });
 
       if (!response.ok) {
         throw new Error(`Token 刷新失败: HTTP ${response.status}`);
