@@ -46,9 +46,16 @@ export async function upsertInstance(params: {
         status = COALESCE(EXCLUDED.status, ding_approval_instance.status),
         result = COALESCE(EXCLUDED.result, ding_approval_instance.result),
         originator_user_id = COALESCE(EXCLUDED.originator_user_id, ding_approval_instance.originator_user_id),
-        originator_user_name = COALESCE(EXCLUDED.originator_user_name, ding_approval_instance.originator_user_name),
-        originator_dept_id = COALESCE(EXCLUDED.originator_dept_id, ding_approval_instance.originator_dept_id),
-        originator_dept_name = COALESCE(EXCLUDED.originator_dept_name, ding_approval_instance.originator_dept_name),
+        originator_user_name = CASE WHEN EXCLUDED.originator_user_id IS NOT NULL
+          AND EXCLUDED.originator_user_id IS DISTINCT FROM ding_approval_instance.originator_user_id
+          THEN EXCLUDED.originator_user_name ELSE COALESCE(EXCLUDED.originator_user_name, ding_approval_instance.originator_user_name) END,
+        originator_dept_id = CASE WHEN EXCLUDED.originator_user_id IS NOT NULL
+          AND EXCLUDED.originator_user_id IS DISTINCT FROM ding_approval_instance.originator_user_id
+          THEN EXCLUDED.originator_dept_id ELSE COALESCE(EXCLUDED.originator_dept_id, ding_approval_instance.originator_dept_id) END,
+        originator_dept_name = CASE WHEN (EXCLUDED.originator_user_id IS NOT NULL
+          AND EXCLUDED.originator_user_id IS DISTINCT FROM ding_approval_instance.originator_user_id)
+          OR (EXCLUDED.originator_dept_id IS NOT NULL AND EXCLUDED.originator_dept_id IS DISTINCT FROM ding_approval_instance.originator_dept_id)
+          THEN EXCLUDED.originator_dept_name ELSE COALESCE(EXCLUDED.originator_dept_name, ding_approval_instance.originator_dept_name) END,
         create_time = COALESCE(EXCLUDED.create_time, ding_approval_instance.create_time),
         finish_time = COALESCE(EXCLUDED.finish_time, ding_approval_instance.finish_time),
         form_component_values = COALESCE(EXCLUDED.form_component_values, ding_approval_instance.form_component_values),

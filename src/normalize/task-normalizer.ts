@@ -1,6 +1,7 @@
 import type { ApprovalTask } from '../dingtalk/types.js';
 import type { JsonValue } from '../db/json-types.js';
 import { parseDingTalkTime } from './instance-normalizer.js';
+import { firstText } from './text.js';
 
 export interface NormalizedTask {
   corp_id: string;
@@ -32,13 +33,13 @@ export function normalizeTasks(
     task_id: task.taskId ?? `task_${process_instance_id}_${index}`,
     task_order: index + 1,
     activity_id: task.activityId ?? null,
-    node_name: task.nodeName ?? task.taskGroupName ?? null,
+    node_name: firstText(task.nodeName, task.taskGroupName),
     status: task.status ?? null,
     result: task.result ?? null,
-    approver_user_id: task.userId ?? null,
-    approver_user_name: task.userName ?? null,
-    approver_dept_id: task.deptId ?? null,
-    approver_dept_name: task.deptName ?? null,
+    approver_user_id: firstText(task.userId),
+    approver_user_name: firstText(task.userName),
+    approver_dept_id: firstText(task.deptId),
+    approver_dept_name: firstText(task.deptName),
     start_time: parseDingTalkTime(task.startTime ?? task.createTime),
     end_time: parseDingTalkTime(task.endTime ?? task.finishTime),
     remark: task.remark ?? null,

@@ -2,13 +2,7 @@ import { getConfig } from '../config/index.js';
 import { findBackfillTemplates, updateLastSyncAt } from '../db/queries/process-template.js';
 import { getAllCorpIds } from '../db/queries/corp-config.js';
 import { searchInstances, getInstance, delay } from '../dingtalk/api-client.js';
-import { normalizeInstance } from '../normalize/instance-normalizer.js';
-import { normalizeTasks } from '../normalize/task-normalizer.js';
-import { processUserSnapshot } from '../normalize/user-snapshot.js';
-import { saveFormFields } from '../normalize/form-field-extractor.js';
-import { upsertInstance } from '../db/queries/approval-instance.js';
-import { upsertTask } from '../db/queries/approval-task.js';
-import { withTransaction } from '../db/pool.js';
+import { persistApprovalInstance } from '../normalize/orchestrator.js';
 import {
   createBackfillCursor,
   updateBackfillCursor,
@@ -207,34 +201,6 @@ async function backfillInstance(corp_id: string, processInstanceId: string, proc
   // 获取完整实例详情
   const instanceDetail = await getInstance(processInstanceId);
 
-  // 使用事务写入所有数据
-  await withTransaction(async (client) => {
-    // 1. 写入审批实例
-    const normalizedInstance = normalizeInstance(corp_id, instanceDetail, {
-      processInstanceId,
-      processCode: processCode || instanceDetail.processCode || undefined,
-    });
-    await upsertInstance(normalizedInstance, client);
-
-    // 2. 写入审批任务
-    if (instanceDetail.tasks && instanceDetail.tasks.length > 0) {
-      const normalizedTasks = normalizeTasks(corp_id, processInstanceId, instanceDetail.tasks);
-
-      for (const task of normalizedTasks) {
-        await upsertTask(task, client);
-      }
-    }
-
-    // 3. 保存表单字段元数据
-    if (instanceDetail.formComponentValues) {
-      await saveFormFields(corp_id, instanceDetail.processCode || processCode || '', instanceDetail.formComponentValues, client);
-    }
-  });
-
-  // 4. 处理用户快照（不阻断主流程）
-  if (instanceDetail.originatorId) {
-    processUserSnapshot(corp_id, instanceDetail.originatorId).catch((error) => {
-      console.error('[Backfill] 用户快照处理失败:', error);
-    });
-  }
+  await persistApprovalInstance({ corpId: corp_id, processInstanceId,
+    processCode: processCode || instanceDetail.processCode || undefined }, instanceDetail);
 }

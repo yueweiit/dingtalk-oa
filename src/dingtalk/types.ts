@@ -1,5 +1,8 @@
 import { z } from 'zod';
 
+const optionalId = z.preprocess(value => typeof value === 'number' && Number.isSafeInteger(value)
+  ? String(value) : value, z.string().nullish());
+
 // Token 响应（oapi 格式）
 export const tokenResponseSchema = z.object({
   access_token: z.string(),
@@ -58,9 +61,9 @@ export const approvalTaskSchema = z.object({
   taskGroupName: z.string().nullish(),
   status: z.string(),
   result: z.string().nullish(),
-  userId: z.string().nullish(),
+  userId: optionalId,
   userName: z.string().nullish(),
-  deptId: z.string().nullish(),
+  deptId: optionalId,
   deptName: z.string().nullish(),
   startTime: z.string().nullish(),
   endTime: z.string().nullish(),
@@ -75,7 +78,9 @@ export const approvalInstanceDetailSchema = z.object({
   processCode: z.string().nullish(),
   originatorId: z.string().nullish(),
   originatorUserId: z.string().nullish(),
-  originatorDeptId: z.string().nullish(),
+  originatorUserName: z.string().nullish(),
+  originatorDeptId: optionalId,
+  originatorDeptName: z.string().nullish(),
   status: z.string(),
   result: z.string().nullish(),
   createTime: z.string().nullish(),
@@ -85,9 +90,9 @@ export const approvalInstanceDetailSchema = z.object({
   tasks: z.array(approvalTaskSchema).optional(),
   operationRecords: z.array(z.any()).optional(),
   originator: z.object({
-    userId: z.string().nullish(),
+    userId: optionalId,
     name: z.string().nullish(),
-    deptId: z.string().nullish(),
+    deptId: optionalId,
     deptName: z.string().nullish(),
   }).optional(),
 }).passthrough();

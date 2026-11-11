@@ -478,6 +478,7 @@ export async function getThumbnailMediaDownload(mediaId: string): Promise<Downlo
 }
 
 export async function getUser(userId: string): Promise<UserInfo> {
+  await acquireDingTalkApiSlot();
   const token = await tokenManager.getToken();
   const url = `https://oapi.dingtalk.com/topapi/v2/user/get?access_token=${token}`;
 
@@ -485,6 +486,7 @@ export async function getUser(userId: string): Promise<UserInfo> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ userid: userId, language: 'zh_CN' }),
+    signal: AbortSignal.timeout(10_000),
   });
 
   if (!response.ok) {

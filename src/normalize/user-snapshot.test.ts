@@ -68,6 +68,18 @@ describe('user snapshot unionId synchronization', () => {
     expect(upsertSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ name: '新资料' }));
   });
 
+  it('coalesces simultaneous fetches for one user and caps global API concurrency at two', async () => {
+    let active = 0, peak = 0;
+    getUser.mockImplementation(async (userid: string) => {
+      active++; peak = Math.max(peak, active);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      active--; return { userid, name: userid };
+    });
+    await Promise.all(['queue-a', 'queue-a', 'queue-b', 'queue-c', 'queue-d'].map(id => processUserSnapshot('corp-queue', id)));
+    expect(getUser).toHaveBeenCalledTimes(4);
+    expect(peak).toBe(2);
+  });
+
   it('retries saving after a database failure instead of caching unsaved data', async () => {
     getUser.mockResolvedValue({ userid: 'retry-user', name: '测试资料' });
     upsertSnapshot.mockRejectedValueOnce(new Error('database unavailable'));

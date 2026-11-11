@@ -10,7 +10,8 @@ import { getTemplateAdminUserId } from '../dingtalk/template-admin-user.js';
 import { withTransaction } from '../db/pool.js';
 import { normalizeInstance } from './instance-normalizer.js';
 import { normalizeTasks } from './task-normalizer.js';
-import { processUserSnapshot } from './user-snapshot.js';
+import { syncApprovalUsers } from './approval-user-sync.js';
+import { tryRepairApprovalMetadata } from '../db/queries/approval-enrichment.js';
 import { saveFormFields } from './form-field-extractor.js';
 import type { JsonValue } from '../db/json-types.js';
 import { monitorBudgetAlertForInstance } from '../jobs/budget-alert-monitor.js';
@@ -42,22 +43,15 @@ export async function persistApprovalInstance(
   params: RefreshApprovalInstanceParams,
   instanceDetail: ApprovalInstanceDetail,
 ): Promise<void> {
+  const normalizedInstance = normalizeInstance(params.corpId, instanceDetail, {
+    processInstanceId: params.processInstanceId,
+    processCode: params.processCode,
+    originatorUserId: params.originatorUserId,
+  });
+  const normalizedTasks = normalizeTasks(params.corpId, params.processInstanceId, instanceDetail.tasks ?? []);
   await withTransaction(async (client) => {
-    const normalizedInstance = normalizeInstance(params.corpId, instanceDetail, {
-      processInstanceId: params.processInstanceId,
-      processCode: params.processCode,
-      originatorUserId: params.originatorUserId,
-    });
     await upsertInstance(normalizedInstance, client);
-
-    if (instanceDetail.tasks && instanceDetail.tasks.length > 0) {
-      const normalizedTasks = normalizeTasks(
-        params.corpId,
-        params.processInstanceId,
-        instanceDetail.tasks
-      );
-      for (const task of normalizedTasks) await upsertTask(task, client);
-    }
+    for (const task of normalizedTasks) await upsertTask(task, client);
 
     if (instanceDetail.formComponentValues) {
       await saveFormFields(
@@ -67,14 +61,14 @@ export async function persistApprovalInstance(
         client
       );
     }
+    await tryRepairApprovalMetadata(client, params.corpId, [params.processInstanceId]);
   });
 
-  const originatorId = instanceDetail.originatorId || params.originatorUserId;
-  if (originatorId) {
-    processUserSnapshot(params.corpId, originatorId).catch((error) => {
-      console.error('[Orchestrator] 用户快照处理失败:', error);
-    });
-  }
+  const userIds = [normalizedInstance.originator_user_id, ...normalizedTasks.map(task => task.approver_user_id)]
+    .filter((id): id is string => Boolean(id));
+  if (userIds.length) void syncApprovalUsers(params.corpId, params.processInstanceId, userIds).catch(error => {
+    console.warn('[Orchestrator] APPROVAL_USER_ENRICHMENT_FAILED', error instanceof Error ? error.message : String(error));
+  });
 }
 
 /**

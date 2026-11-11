@@ -7,6 +7,9 @@ import type { UserInfo } from '../dingtalk/types.js';
 const userCache = new Map<string, { data: UserInfo; expiresAt: number }>();
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 小时
 const MAX_CACHE_SIZE = 10000;
+const pendingUsers = new Map<string, Promise<void>>();
+const waitingUsers: Array<() => void> = [];
+let activeUsers = 0;
 
 const UNION_ID_KEYS = ['union_id', 'unionId', 'unionid'] as const;
 
@@ -84,7 +87,7 @@ export function classifyUserFetchFailure(error: unknown): { fetch_status: 'not_f
  * 3. hash 相同则跳过
  * 4. hash 不同则关闭旧快照并插入新行
  */
-export async function processUserSnapshot(
+async function saveUserSnapshot(
   corp_id: string,
   user_id: string
 ): Promise<void> {
@@ -127,4 +130,27 @@ export async function processUserSnapshot(
     console.error(`[UserSnapshot] 处理用户快照失败: ${user_id}`, error);
     // 不抛出异常，避免阻断审批归档
   }
+}
+
+/** 同用户并发请求合并，全进程最多两个用户 API 请求，避免审批节点补全放大调用量。 */
+export function processUserSnapshot(corpId: string, userId: string): Promise<void> {
+  const key = `${corpId}:${userId}`;
+  const pending = pendingUsers.get(key);
+  if (pending) return pending;
+  if (getCachedUser(corpId, userId)) return Promise.resolve();
+  if (pendingUsers.size >= MAX_CACHE_SIZE) {
+    console.warn('[UserSnapshot] USER_SNAPSHOT_QUEUE_FULL');
+    return Promise.resolve();
+  }
+  const work = (async () => {
+    if (activeUsers < 2) activeUsers++;
+    else await new Promise<void>(resolve => waitingUsers.push(resolve));
+    try { await saveUserSnapshot(corpId, userId); }
+    finally {
+      const next = waitingUsers.shift();
+      if (next) next(); else activeUsers--;
+    }
+  })().finally(() => { pendingUsers.delete(key); });
+  pendingUsers.set(key, work);
+  return work;
 }

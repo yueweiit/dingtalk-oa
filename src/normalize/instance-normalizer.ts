@@ -1,5 +1,6 @@
 import type { ApprovalInstanceDetail } from '../dingtalk/types.js';
 import type { JsonValue } from '../db/json-types.js';
+import { firstText } from './text.js';
 
 export interface NormalizedInstance {
   corp_id: string;
@@ -38,6 +39,11 @@ export function normalizeInstance(
   detail: ApprovalInstanceDetail,
   fallbacks?: { processInstanceId?: string; processCode?: string; originatorUserId?: string }
 ): NormalizedInstance {
+  const rootUserId = firstText(detail.originatorUserId, detail.originatorId);
+  const userId = firstText(detail.originator?.userId, rootUserId, fallbacks?.originatorUserId);
+  const sameRootUser = !rootUserId || rootUserId === userId;
+  const rootDeptId = sameRootUser ? firstText(detail.originatorDeptId) : null;
+  const deptId = firstText(detail.originator?.deptId, rootDeptId);
   return {
     corp_id,
     process_instance_id: detail.processInstanceId || fallbacks?.processInstanceId || '',
@@ -45,10 +51,11 @@ export function normalizeInstance(
     title: detail.title ?? null,
     status: detail.status ?? null,
     result: detail.result ?? null,
-    originator_user_id: detail.originator?.userId ?? detail.originatorId ?? fallbacks?.originatorUserId ?? null,
-    originator_user_name: detail.originator?.name ?? null,
-    originator_dept_id: detail.originator?.deptId ?? detail.originatorDeptId ?? null,
-    originator_dept_name: detail.originator?.deptName ?? null,
+    originator_user_id: userId,
+    originator_user_name: firstText(detail.originator?.name, sameRootUser ? detail.originatorUserName : null),
+    originator_dept_id: deptId,
+    originator_dept_name: firstText(detail.originator?.deptName,
+      sameRootUser && (!rootDeptId || rootDeptId === deptId) ? detail.originatorDeptName : null),
     create_time: parseDingTalkTime(detail.createTime),
     finish_time: parseDingTalkTime(detail.finishTime),
     form_component_values: safeSerialize(detail.formComponentValues),

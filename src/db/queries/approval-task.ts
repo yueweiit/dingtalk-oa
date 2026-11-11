@@ -40,9 +40,16 @@ export async function upsertTask(params: {
         status = COALESCE(EXCLUDED.status, ding_approval_task.status),
         result = COALESCE(EXCLUDED.result, ding_approval_task.result),
         approver_user_id = COALESCE(EXCLUDED.approver_user_id, ding_approval_task.approver_user_id),
-        approver_user_name = COALESCE(EXCLUDED.approver_user_name, ding_approval_task.approver_user_name),
-        approver_dept_id = COALESCE(EXCLUDED.approver_dept_id, ding_approval_task.approver_dept_id),
-        approver_dept_name = COALESCE(EXCLUDED.approver_dept_name, ding_approval_task.approver_dept_name),
+        approver_user_name = CASE WHEN EXCLUDED.approver_user_id IS NOT NULL
+          AND EXCLUDED.approver_user_id IS DISTINCT FROM ding_approval_task.approver_user_id
+          THEN EXCLUDED.approver_user_name ELSE COALESCE(EXCLUDED.approver_user_name, ding_approval_task.approver_user_name) END,
+        approver_dept_id = CASE WHEN EXCLUDED.approver_user_id IS NOT NULL
+          AND EXCLUDED.approver_user_id IS DISTINCT FROM ding_approval_task.approver_user_id
+          THEN EXCLUDED.approver_dept_id ELSE COALESCE(EXCLUDED.approver_dept_id, ding_approval_task.approver_dept_id) END,
+        approver_dept_name = CASE WHEN (EXCLUDED.approver_user_id IS NOT NULL
+          AND EXCLUDED.approver_user_id IS DISTINCT FROM ding_approval_task.approver_user_id)
+          OR (EXCLUDED.approver_dept_id IS NOT NULL AND EXCLUDED.approver_dept_id IS DISTINCT FROM ding_approval_task.approver_dept_id)
+          THEN EXCLUDED.approver_dept_name ELSE COALESCE(EXCLUDED.approver_dept_name, ding_approval_task.approver_dept_name) END,
         start_time = COALESCE(EXCLUDED.start_time, ding_approval_task.start_time),
         end_time = CASE
           WHEN UPPER(COALESCE(EXCLUDED.status, '')) = 'RUNNING'
