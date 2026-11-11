@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { getUser } from '../dingtalk/api-client.js';
 import { upsertSnapshot, recordFetchFailure } from '../db/queries/user-snapshot.js';
+import { hasEffectiveUserDeparture } from '../db/queries/user-departure.js';
 import type { UserInfo } from '../dingtalk/types.js';
 
 // 内存 LRU 缓存（1 小时 TTL）
@@ -80,6 +81,17 @@ export function classifyUserFetchFailure(error: unknown): { fetch_status: 'not_f
   };
 }
 
+/** Both snapshot refresh entry points use the same departure check before and after the network call. */
+export async function fetchUserForSnapshot(corpId: string, userId: string) {
+  if (await hasEffectiveUserDeparture(corpId, userId)) return { status: 'departed' } as const;
+  const fetched = await getUser(userId).then(
+    user => ({ status: 'success', user } as const),
+    error => ({ status: 'failed', failure: classifyUserFetchFailure(error) } as const),
+  );
+  if (await hasEffectiveUserDeparture(corpId, userId)) return { status: 'departed' } as const;
+  return fetched;
+}
+
 /**
  * 处理用户快照
  * 1. 计算用户核心字段 hash
@@ -96,18 +108,15 @@ async function saveUserSnapshot(
     const cached = getCachedUser(corp_id, user_id);
     // 缓存命中意味着该响应已成功落库，不重放旧资料覆盖其他进程较新的成功快照。
     if (cached) return;
-    let userInfo: UserInfo;
-
-    // 调用钉钉 API 获取用户信息
-    try {
-      userInfo = await getUser(user_id);
-    } catch (error: unknown) {
+    const fetched = await fetchUserForSnapshot(corp_id, user_id);
+    if (fetched.status === 'departed') return;
+    if (fetched.status === 'failed') {
       // 人员兜底：getUser 失败时只记录失败历史，不阻断审批归档。
-      const failure = classifyUserFetchFailure(error);
-      console.warn(`[UserSnapshot] 获取用户信息失败: ${user_id}`, failure.fetch_error);
-      await recordFetchFailure({ corp_id, user_id, ...failure });
+      console.warn(`[UserSnapshot] 获取用户信息失败: ${user_id}`, fetched.failure.fetch_error);
+      await recordFetchFailure({ corp_id, user_id, ...fetched.failure });
       return;
     }
+    const userInfo = fetched.user;
 
     // 计算 hash
     const snapshot_hash = computeUserHash(userInfo);

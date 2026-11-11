@@ -1,7 +1,7 @@
 import { getConfig } from '../src/config/index.js';
 import { getPool, closePool, withTransaction } from '../src/db/pool.js';
-import { listProcessTemplates, getUser, listDepartments, listUsers } from '../src/dingtalk/api-client.js';
-import { classifyUserFetchFailure, computeUserHash, extractUserUnionId } from '../src/normalize/user-snapshot.js';
+import { listProcessTemplates, listDepartments, listUsers } from '../src/dingtalk/api-client.js';
+import { fetchUserForSnapshot, computeUserHash, extractUserUnionId } from '../src/normalize/user-snapshot.js';
 import { recordFetchFailure, upsertSnapshot } from '../src/db/queries/user-snapshot.js';
 import { syncDepartmentTree } from '../src/organization/department-tree-sync.js';
 import { getTemplateAdminUserId } from '../src/dingtalk/template-admin-user.js';
@@ -132,18 +132,20 @@ async function syncUsers(corpId: string) {
   }
 
   // 3. 同步用户快照
-  let success = 0, skipped = 0, unionIdsUpdated = 0, failed = 0;
+  let success = 0, skipped = 0, departed = 0, unionIdsUpdated = 0, failed = 0;
   for (const [userId, userSummary] of allUsers) {
     try {
-      // 用 getUser 获取完整用户信息
-      let user: Awaited<ReturnType<typeof getUser>>;
-      try {
-        user = await getUser(userId);
-      } catch (error) {
-        await recordFetchFailure({ corp_id: corpId, user_id: userId, ...classifyUserFetchFailure(error) });
+      const fetched = await fetchUserForSnapshot(corpId, userId);
+      if (fetched.status === 'departed') {
+        departed++;
+        continue;
+      }
+      if (fetched.status === 'failed') {
+        await recordFetchFailure({ corp_id: corpId, user_id: userId, ...fetched.failure });
         failed++;
         continue;
       }
+      const user = fetched.user;
       const snapshotHash = computeUserHash(user);
       const userUnionId = extractUserUnionId(user);
       const unionId = userUnionId ?? extractUserUnionId(userSummary);
@@ -167,7 +169,7 @@ async function syncUsers(corpId: string) {
     }
   }
 
-  console.log(`用户同步完成: 成功 ${success}, 跳过 ${skipped}, 补齐 unionId ${unionIdsUpdated}, 失败 ${failed}`);
+  console.log(`用户同步完成: 成功 ${success}, 跳过 ${skipped}, 离职 ${departed}, 补齐 unionId ${unionIdsUpdated}, 失败 ${failed}`);
   // 即使资料 hash 未变化，也必须执行；按实例分批，不在每个用户后重复全表 UPDATE。
   const repaired = await backfillApprovalMetadata(corpId, { dryRun: false });
   console.log('[MetadataSync] APPROVAL_METADATA_BACKFILL', JSON.stringify(repaired));

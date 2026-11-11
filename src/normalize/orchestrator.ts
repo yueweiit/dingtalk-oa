@@ -12,6 +12,8 @@ import { normalizeInstance } from './instance-normalizer.js';
 import { normalizeTasks } from './task-normalizer.js';
 import { syncApprovalUsers } from './approval-user-sync.js';
 import { tryRepairApprovalMetadata } from '../db/queries/approval-enrichment.js';
+import { syncApprovalDeparture } from '../db/queries/user-departure.js';
+import { departureProcessCodes } from './user-departure.js';
 import { saveFormFields } from './form-field-extractor.js';
 import type { JsonValue } from '../db/json-types.js';
 import { monitorBudgetAlertForInstance } from '../jobs/budget-alert-monitor.js';
@@ -50,7 +52,10 @@ export async function persistApprovalInstance(
   });
   const normalizedTasks = normalizeTasks(params.corpId, params.processInstanceId, instanceDetail.tasks ?? []);
   await withTransaction(async (client) => {
-    await upsertInstance(normalizedInstance, client);
+    const archivedInstance = await upsertInstance(normalizedInstance, client);
+    if (departureProcessCodes.includes(normalizedInstance.process_code)) {
+      await syncApprovalDeparture(client, archivedInstance);
+    }
     for (const task of normalizedTasks) await upsertTask(task, client);
 
     if (instanceDetail.formComponentValues) {
