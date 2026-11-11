@@ -8,6 +8,7 @@ const Builder = require('node-pg-migrate/dist/migrationBuilder').default;
 const migration = require('../../migrations/20261110000000_separate_user_fetch_failures.cjs');
 const validation = require('../../migrations/20261110000001_validate_user_snapshot_current.cjs');
 const cleanup = require('../../migrations/20261110000002_purge_legacy_failed_user_snapshots.cjs');
+const departure = require('../../migrations/20261111000000_create_ding_user_departure.cjs');
 function build(direction: 'up' | 'down' = 'up', definition = migration) {
   const builder = new Builder({ query: () => { throw new Error('DATABASE_ACCESS_NOT_ALLOWED'); } }, undefined, false, console);
   definition[direction](builder);
@@ -15,6 +16,17 @@ function build(direction: 'up' | 'down' = 'up', definition = migration) {
 }
 
 describe('user snapshot migration and writer contract (no database)', () => {
+  it('adds a transactional departure table keyed by enterprise and source approval with a bounded lock wait', () => {
+    const { sql, transactional } = build('up', departure);
+    expect(transactional).toBe(true);
+    expect(sql).toContain("SET LOCAL lock_timeout = '5s'");
+    expect(sql).toContain('PRIMARY KEY (corp_id, source_process_instance_id)');
+    expect(sql).toContain('REFERENCES public.ding_approval_instance (corp_id, process_instance_id) ON DELETE RESTRICT');
+    expect(sql).toContain("CHECK (candidate_user_id IS NULL OR (region = 'MX' AND user_id IS NULL");
+    expect(sql).toContain("CHECK (NOT identity_review_required OR identity_method IS NOT DISTINCT FROM 'manual')");
+    expect(sql).toContain('WHERE user_id IS NOT NULL AND departed_on IS NOT NULL AND NOT identity_review_required');
+    expect(() => build('down', departure)).toThrow('DEPARTURE_ROLLBACK_REQUIRES_PRESERVING_MANUALLY_CONFIRMED_RECORDS');
+  });
   it('builds transactional DDL for separate failure history and a unique current profile', () => {
     const { sql, transactional } = build();
     expect(transactional).toBe(true);

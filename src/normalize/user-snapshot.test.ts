@@ -1,13 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { getUser, upsertSnapshot, recordFetchFailure } = vi.hoisted(() => ({
+const { getUser, upsertSnapshot, recordFetchFailure, hasEffectiveUserDeparture } = vi.hoisted(() => ({
   getUser: vi.fn(),
   upsertSnapshot: vi.fn(),
   recordFetchFailure: vi.fn(),
+  hasEffectiveUserDeparture: vi.fn(),
 }));
 
 vi.mock('../dingtalk/api-client.js', () => ({ getUser }));
 vi.mock('../db/queries/user-snapshot.js', () => ({ upsertSnapshot, recordFetchFailure }));
+vi.mock('../db/queries/user-departure.js', () => ({ hasEffectiveUserDeparture }));
 
 import { classifyUserFetchFailure, extractUserUnionId, processUserSnapshot } from './user-snapshot.js';
 
@@ -18,6 +20,7 @@ describe('user snapshot unionId synchronization', () => {
     vi.clearAllMocks();
     upsertSnapshot.mockResolvedValue({ inserted: true, snapshot: {} });
     recordFetchFailure.mockResolvedValue(undefined);
+    hasEffectiveUserDeparture.mockReset().mockResolvedValue(false);
   });
 
   it.each([
@@ -87,6 +90,29 @@ describe('user snapshot unionId synchronization', () => {
     await processUserSnapshot('corp-test', 'retry-user');
     expect(getUser).toHaveBeenCalledTimes(2);
     expect(upsertSnapshot).toHaveBeenCalledTimes(2);
+    expect(recordFetchFailure).not.toHaveBeenCalled();
+  });
+
+  it('skips requests and writes for an effective departure while refreshing the same ID in another enterprise', async () => {
+    hasEffectiveUserDeparture.mockImplementation(async corpId => corpId === 'corp-departure');
+    getUser.mockResolvedValue({ userid: 'departed-user', name: 'Other enterprise' });
+    await processUserSnapshot('corp-departure', 'departed-user');
+    expect(getUser).not.toHaveBeenCalled();
+    expect(upsertSnapshot).not.toHaveBeenCalled();
+    expect(recordFetchFailure).not.toHaveBeenCalled();
+
+    await processUserSnapshot('corp-other', 'departed-user');
+    expect(getUser).toHaveBeenCalledOnce();
+    expect(upsertSnapshot).toHaveBeenCalledWith(expect.objectContaining({ corp_id: 'corp-other' }));
+  });
+
+  it.each(['success', 'failed'])('discards a %s response when departure takes effect during the request', async status => {
+    hasEffectiveUserDeparture.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    if (status === 'success') getUser.mockResolvedValueOnce({ userid: 'during-request', name: 'Old name' });
+    else getUser.mockRejectedValueOnce(new Error('oapi 错误: 60121 The user could not be found'));
+    await processUserSnapshot('corp-departure', 'during-request');
+    expect(getUser).toHaveBeenCalledOnce();
+    expect(upsertSnapshot).not.toHaveBeenCalled();
     expect(recordFetchFailure).not.toHaveBeenCalled();
   });
 });

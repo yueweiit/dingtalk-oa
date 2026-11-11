@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const state = vi.hoisted(() => ({
-  users: vi.fn(), departments: vi.fn(), getUser: vi.fn(), upsert: vi.fn(), repair: vi.fn(), close: vi.fn(),
+  users: vi.fn(), departments: vi.fn(), getUser: vi.fn(), upsert: vi.fn(), repair: vi.fn(), close: vi.fn(), departure: vi.fn(),
 }));
 vi.mock('../config/index.js', () => ({ getConfig: () => ({ DINGTALK_CORP_ID: 'corp-sync-test' }) }));
 vi.mock('../db/pool.js', () => ({ getPool: () => ({}), closePool: state.close,
@@ -10,6 +10,7 @@ vi.mock('../dingtalk/api-client.js', () => ({ getUser: state.getUser, listUsers:
   listDepartments: state.departments, listProcessTemplates: vi.fn(),
 }));
 vi.mock('../db/queries/user-snapshot.js', () => ({ upsertSnapshot: state.upsert, recordFetchFailure: vi.fn() }));
+vi.mock('../db/queries/user-departure.js', () => ({ hasEffectiveUserDeparture: state.departure }));
 vi.mock('../organization/department-tree-sync.js', () => ({ syncDepartmentTree: vi.fn().mockResolvedValue(2) }));
 vi.mock('./approval-metadata-backfill.js', () => ({ backfillApprovalMetadata: state.repair }));
 
@@ -21,6 +22,7 @@ beforeEach(() => {
   state.users.mockResolvedValue({ list: [{ userid: 'user-a' }], hasMore: false, nextCursor: 0 });
   state.getUser.mockResolvedValue({ userid: 'user-a', name: '已有用户', dept_id_list: ['20'] });
   state.upsert.mockResolvedValue({ inserted: false, snapshot: {} });
+  state.departure.mockReset().mockResolvedValue(false);
   state.repair.mockResolvedValue({ scanned: 10, instances: 1, tasks: 2, dryRun: false });
 });
 afterEach(() => { process.argv = originalArgv; });
@@ -45,6 +47,15 @@ describe('manual user synchronization regression', () => {
     state.users.mockResolvedValue({ list: [], hasMore: false, nextCursor: 0 });
     await runScript();
     expect(state.getUser).not.toHaveBeenCalled();
+    expect(state.repair).toHaveBeenCalledWith('corp-sync-test', { dryRun: false });
+  });
+
+  it('does not refresh a departed user who still appears in a department list', async () => {
+    state.departure.mockResolvedValue(true);
+    await runScript();
+    expect(state.departure).toHaveBeenCalledWith('corp-sync-test', 'user-a');
+    expect(state.getUser).not.toHaveBeenCalled();
+    expect(state.upsert).not.toHaveBeenCalled();
     expect(state.repair).toHaveBeenCalledWith('corp-sync-test', { dryRun: false });
   });
 });

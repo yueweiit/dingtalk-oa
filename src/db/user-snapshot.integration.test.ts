@@ -2,6 +2,7 @@ import pg from 'pg';
 import { createRequire } from 'node:module';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getCurrentSnapshot, recordFetchFailure, upsertSnapshot } from './queries/user-snapshot.js';
+import { backfillUserDepartures, hasEffectiveUserDeparture } from './queries/user-departure.js';
 
 const state = vi.hoisted(() => ({ pool: null as pg.Pool | null }));
 vi.mock('./pool.js', () => {
@@ -56,6 +57,8 @@ describe.skipIf(!databaseUrl)('user snapshot migration and concurrency (isolated
     try { await admin.query(sql(migration)); await admin.query('COMMIT'); }
     catch (error) { await admin.query('ROLLBACK'); throw error; }
     await admin.query(sql(validationMigration));
+    await admin.query(sql('20260703000001_create_ding_approval_instance'));
+    await admin.query(sql('20261111000000_create_ding_user_departure'));
     state.pool = new pg.Pool({ connectionString: databaseUrl, options: `-c search_path=${schema}`, max: 5 });
   });
   afterAll(async () => {
@@ -64,7 +67,153 @@ describe.skipIf(!databaseUrl)('user snapshot migration and concurrency (isolated
     await admin?.end();
   });
   beforeEach(async () => {
-    await admin!.query(`TRUNCATE "${schema}".ding_user_fetch_failure, "${schema}".ding_user_snapshot`);
+    await admin!.query(`TRUNCATE "${schema}".ding_user_fetch_failure, "${schema}".ding_user_snapshot,
+      "${schema}".ding_user_departure, "${schema}".ding_approval_instance`);
+  });
+
+  describe('approval-derived departures', () => {
+    const cnCode = 'PROC-A917A16C-ADED-42A0-830A-DF20A5880948';
+    const mxCode = 'PROC-7DB16FD2-70D6-41AE-9C5D-AE3DFF53A957';
+    const cnFields = [
+      { id: 'TextField_SGOO4D848XC0', value: '员工历史姓名' },
+      { id: 'DDDateField_TQHUCEXTH2O0', value: '2026-11-20' },
+    ];
+    const mxFields = [
+      { id: 'TextField_6RXTO615OMS0', value: 'Ana Ejemplo' },
+      { id: 'TextareaField_1POXA3C2RB9C0', value: 'Ana E.' },
+      { id: 'DDDateField_EZMO31OXMUW0', value: '2026-11-20' },
+    ];
+    async function source(id: string, code: string, originator: string, fields: typeof cnFields, status = 'COMPLETED') {
+      await admin!.query(`INSERT INTO ding_approval_instance
+        (corp_id,process_instance_id,process_code,status,result,originator_user_id,form_component_values,raw_payload)
+        VALUES ($1,$2,$3,$4,'agree',$5,$6,$7)`,
+      [profile.corp_id, id, code, status, originator, JSON.stringify(fields),
+        JSON.stringify({ originatorUserId: originator, status, result: 'agree', formComponentValues: fields })]);
+    }
+    async function refreshRaw(id: string, originator: string, fields?: typeof cnFields) {
+      await admin!.query(`UPDATE ding_approval_instance SET raw_payload = $1 WHERE corp_id = $2 AND process_instance_id = $3`,
+        [JSON.stringify({ originatorUserId: originator, status: 'COMPLETED', result: 'agree', formComponentValues: fields }), profile.corp_id, id]);
+    }
+    async function departures() {
+      return (await admin!.query(`SELECT source_process_instance_id,employee_name,dingtalk_name,departed_on::text,
+        user_id,identity_method,candidate_user_id,identity_review_required,updated_at
+        FROM ding_user_departure ORDER BY source_process_instance_id`)).rows;
+    }
+
+    it('previews without writing, then backfills once while preserving the snapshot and source', async () => {
+      await upsertSnapshot(profile);
+      await source('a', cnCode, profile.user_id, cnFields);
+      await admin!.query(`UPDATE ding_approval_instance SET originator_user_id = NULL WHERE process_instance_id = 'a'`);
+      await source('b', cnCode, 'waiting', cnFields, 'RUNNING');
+      expect(await backfillUserDepartures(profile.corp_id)).toEqual({
+        scanned: 2, approved: 1, identified: 1, pendingIdentity: 0, candidates: 0, pendingDate: 0, dryRun: true,
+      });
+      expect(await departures()).toEqual([]);
+      await backfillUserDepartures(profile.corp_id, { dryRun: false });
+      const rows = await departures();
+      expect(rows).toEqual([expect.objectContaining({
+        source_process_instance_id: 'a', employee_name: '员工历史姓名', departed_on: '2026-11-20',
+        user_id: profile.user_id, identity_method: 'originator',
+      })]);
+      await backfillUserDepartures(profile.corp_id, { dryRun: false });
+      expect(await departures()).toEqual(rows);
+      expect(await getCurrentSnapshot(profile.corp_id, profile.user_id)).toMatchObject({
+        name: profile.name, is_current: true, valid_to: null,
+      });
+    });
+
+    it('activates at the local departure date and stops suppressing when the source is revoked or deleted', async () => {
+      await source('a', cnCode, profile.user_id, cnFields);
+      await backfillUserDepartures(profile.corp_id, { dryRun: false });
+      const start = new Date('2026-11-19T16:00:00.000Z');
+      expect(await hasEffectiveUserDeparture(profile.corp_id, profile.user_id, new Date(start.getTime() - 1))).toBe(false);
+      expect(await hasEffectiveUserDeparture(profile.corp_id, profile.user_id, start)).toBe(true);
+      expect(await hasEffectiveUserDeparture('another-corp', profile.user_id, start)).toBe(false);
+      await admin!.query(`UPDATE ding_approval_instance SET status = 'TERMINATED' WHERE process_instance_id = 'a'`);
+      expect(await hasEffectiveUserDeparture(profile.corp_id, profile.user_id, start)).toBe(false);
+      await admin!.query(`UPDATE ding_approval_instance SET status = 'COMPLETED', deleted_at = now() WHERE process_instance_id = 'a'`);
+      expect(await hasEffectiveUserDeparture(profile.corp_id, profile.user_id, start)).toBe(false);
+      expect(await departures()).toHaveLength(1);
+    });
+
+    it('only offers a historical Mexican name match as a candidate until explicitly confirmed', async () => {
+      await source('a', mxCode, 'hr', mxFields);
+      await upsertSnapshot({ ...profile, name: 'Ana Ejemplo' });
+      await upsertSnapshot({ ...profile, name: 'ANA E.', snapshot_hash: 'renamed' });
+      await upsertSnapshot({ ...profile, corp_id: 'other-corp', user_id: 'other-user', name: 'Ana Ejemplo' });
+      await backfillUserDepartures(profile.corp_id, { dryRun: false });
+      expect(await departures()).toEqual([expect.objectContaining({ user_id: null, identity_method: null, candidate_user_id: profile.user_id })]);
+      const start = new Date('2026-11-20T06:00:00.000Z');
+      expect(await hasEffectiveUserDeparture(profile.corp_id, profile.user_id, start)).toBe(false);
+      await backfillUserDepartures(profile.corp_id, { dryRun: false, instanceId: 'a', confirmedUserId: profile.user_id });
+      expect((await departures())[0]).toMatchObject({ user_id: profile.user_id, identity_method: 'manual', candidate_user_id: null });
+      expect(await hasEffectiveUserDeparture(profile.corp_id, profile.user_id, new Date(start.getTime() - 1))).toBe(false);
+      expect(await hasEffectiveUserDeparture(profile.corp_id, profile.user_id, start)).toBe(true);
+      expect(await hasEffectiveUserDeparture(profile.corp_id, 'hr', start)).toBe(false);
+    });
+
+    it('preserves manual identity and names on partial or reformatted replays and pauses on a real conflict', async () => {
+      await source('a', mxCode, 'hr', mxFields);
+      await upsertSnapshot({ ...profile, name: 'Ana Ejemplo' });
+      await upsertSnapshot({ ...profile, name: 'Ana E.', snapshot_hash: 'renamed' });
+      await upsertSnapshot({ ...profile, user_id: 'another-user', name: 'Ana E.' });
+      await source('b', mxCode, 'hr', [mxFields[0], mxFields[2]]);
+      expect(await backfillUserDepartures(profile.corp_id, { dryRun: false })).toMatchObject({ pendingIdentity: 2 });
+      expect((await departures()).every(row => row.user_id === null && row.identity_method === null)).toBe(true);
+      await backfillUserDepartures(profile.corp_id, { dryRun: false, instanceId: 'a', confirmedUserId: 'verified-employee' });
+      await backfillUserDepartures(profile.corp_id, { dryRun: false });
+      const confirmed = (await departures())[0];
+      expect(confirmed).toMatchObject({ user_id: 'verified-employee', identity_method: 'manual' });
+      await refreshRaw('a', 'hr', [{ ...mxFields[0], value: 'ANA  EJEMPLO' }, mxFields[2]]);
+      await backfillUserDepartures(profile.corp_id, { dryRun: false });
+      expect((await departures())[0]).toEqual(confirmed);
+      const at = new Date('2026-11-21T00:00:00Z');
+      expect(await hasEffectiveUserDeparture(profile.corp_id, 'verified-employee', at)).toBe(true);
+
+      await refreshRaw('a', 'hr', [{ ...mxFields[0], value: 'Otro empleado' }, mxFields[2]]);
+      await backfillUserDepartures(profile.corp_id, { dryRun: false });
+      expect((await departures())[0]).toMatchObject({
+        user_id: 'verified-employee', identity_method: 'manual', identity_review_required: true,
+        employee_name: 'Ana Ejemplo', dingtalk_name: 'Ana E.',
+      });
+      expect(await hasEffectiveUserDeparture(profile.corp_id, 'verified-employee', at)).toBe(false);
+      await refreshRaw('a', 'hr', mxFields);
+      await backfillUserDepartures(profile.corp_id, { dryRun: false });
+      expect((await departures())[0]).toMatchObject({ identity_review_required: true });
+      await backfillUserDepartures(profile.corp_id, { dryRun: false, instanceId: 'a', confirmedUserId: 'verified-employee' });
+      expect(await hasEffectiveUserDeparture(profile.corp_id, 'verified-employee', at)).toBe(true);
+    });
+
+    it('does not use an old merged form date and waits for the corrected original approved date', async () => {
+      await source('a', cnCode, profile.user_id, cnFields);
+      await refreshRaw('a', profile.user_id);
+      expect(await backfillUserDepartures(profile.corp_id, { dryRun: false })).toMatchObject({ pendingDate: 1 });
+      const oldDate = new Date('2026-11-20T00:00:00Z');
+      expect(await hasEffectiveUserDeparture(profile.corp_id, profile.user_id, oldDate)).toBe(false);
+      await refreshRaw('a', profile.user_id, [cnFields[0], { ...cnFields[1], value: '2026-11-30' }]);
+      expect(await backfillUserDepartures(profile.corp_id, { dryRun: false })).toMatchObject({ pendingDate: 0 });
+      expect(await hasEffectiveUserDeparture(profile.corp_id, profile.user_id, oldDate)).toBe(false);
+      expect(await hasEffectiveUserDeparture(profile.corp_id, profile.user_id, new Date('2026-11-29T16:00:00Z'))).toBe(true);
+    });
+
+    it('keeps conflicting Chinese original submitters pending', async () => {
+      await source('a', cnCode, profile.user_id, cnFields);
+      await admin!.query(`UPDATE ding_approval_instance SET raw_payload = raw_payload || '{"originator":{"userId":"other-user"}}'::jsonb
+        WHERE process_instance_id = 'a'`);
+      expect(await backfillUserDepartures(profile.corp_id, { dryRun: false })).toMatchObject({ identified: 0, pendingIdentity: 1 });
+      for (const userId of [profile.user_id, 'other-user']) {
+        expect(await hasEffectiveUserDeparture(profile.corp_id, userId, new Date('2026-11-21T00:00:00Z'))).toBe(false);
+      }
+    });
+
+    it('blocks hard deletion of an approval with confirmed identity and preserves both records', async () => {
+      await source('a', mxCode, 'hr', mxFields);
+      await backfillUserDepartures(profile.corp_id, { dryRun: false, instanceId: 'a', confirmedUserId: 'verified-employee' });
+      await expect(admin!.query(`DELETE FROM ding_approval_instance WHERE process_instance_id = 'a'`))
+        .rejects.toMatchObject({ code: '23503' });
+      expect((await departures())[0]).toMatchObject({ user_id: 'verified-employee', employee_name: 'Ana Ejemplo' });
+      expect((await admin!.query(`SELECT 1 FROM ding_approval_instance WHERE process_instance_id = 'a'`)).rowCount).toBe(1);
+    });
   });
 
   async function migrateLegacy(seedSql = '') {
