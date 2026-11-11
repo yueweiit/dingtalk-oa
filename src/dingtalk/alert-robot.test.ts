@@ -40,9 +40,12 @@ describe('alert robot', () => {
     const { sendAlertChatMessage, sendAlertGroupMessage } = await import('./alert-robot.js');
     const fetchMock = mockFetch();
     fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ processQueryKey: 'group-message' }) });
-    await sendAlertChatMessage(['user-1'], '个人提醒');
+    await sendAlertChatMessage(['user-1'], 'Ver aprobación', 'Aprobaciones vencidas');
     await sendAlertGroupMessage('cid-group', '审批超时');
     expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(JSON.parse(fetchMock.mock.calls[1][1].body).msgParam)).toEqual({
+      title: 'Aprobaciones vencidas', text: 'Ver aprobación',
+    });
     expect(fetchMock).toHaveBeenNthCalledWith(3,
       'https://api.dingtalk.com/v1.0/robot/groupMessages/send',
       expect.objectContaining({
@@ -66,13 +69,13 @@ describe('alert robot', () => {
   it('mentions the given users through both API metadata and markdown markers', async () => {
     const { sendAlertGroupMessage } = await import('./alert-robot.js');
     const fetchMock = mockFetch();
-    await sendAlertGroupMessage('cid-group', '审批超时', [' user-1 ', 'user-2', 'user-1', ' ']);
+    await sendAlertGroupMessage('cid-group', 'Ver aprobación', [' user-1 ', 'user-2', 'user-1', ' '], 'Aprobaciones vencidas');
     const payload = JSON.parse(fetchMock.mock.calls[1][1].body);
     expect(payload).toMatchObject({
       robotCode: 'robot-1', openConversationId: 'cid-group', msgKey: 'sampleMarkdown',
       atUserIds: ['user-1', 'user-2'], isAtAll: false,
     });
-    expect(JSON.parse(payload.msgParam)).toEqual({ title: '统一预警', text: '@user-1 @user-2\n\n审批超时' });
+    expect(JSON.parse(payload.msgParam)).toEqual({ title: 'Aprobaciones vencidas', text: '@user-1 @user-2\n\nVer aprobación' });
     expect(payload).not.toHaveProperty('at');
   });
 

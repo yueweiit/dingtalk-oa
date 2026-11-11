@@ -10,6 +10,8 @@ const state = vi.hoisted(() => ({
     DINGTALK_ALERT_RECIPIENT_USER_IDS: 'old-fixed-receiver',
     APPROVAL_TIMEOUT_PROCESS_CODES: 'PROC-TEST',
     APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS: '',
+    APPROVAL_TIMEOUT_ES_USER_IDS: '',
+    APPROVAL_TIMEOUT_ZH_USER_IDS: '',
     APPROVAL_TIMEOUT_MINUTES: 72 * 60,
   },
   query: vi.fn(),
@@ -23,10 +25,11 @@ vi.mock('../dingtalk/alert-robot.js', () => ({ sendAlertChatMessage: state.send,
 const startedAt = new Date('2026-11-01T04:00:00Z');
 const atHour = (hour: number) => new Date(startedAt.getTime() + hour * 3_600_000);
 const chineseTitle = '审批超时汇总';
+const spanishTitle = 'Aprobaciones vencidas';
 const candidate = (overrides: Partial<ApprovalTimeoutCandidate> = {}): ApprovalTimeoutCandidate => ({
   corpId: 'corp-1', processInstanceId: 'instance-1', processCode: 'PROC-TEST',
   title: '测试采购审批', taskId: 'task-1', taskStartTime: startedAt,
-  approverUserId: 'approver-1', approverUserName: '测试审批人', nodeName: '负责人审批',
+  approverUserId: 'approver-1', nodeName: '负责人审批',
   rawTask: {}, rawInstance: {}, ...overrides,
 });
 function dependencies(hour = 72, candidates = [candidate()]) {
@@ -34,6 +37,8 @@ function dependencies(hour = 72, candidates = [candidate()]) {
     now: () => atHour(hour),
     findCandidates: vi.fn<ApprovalTimeoutMonitorDependencies['findCandidates']>().mockImplementation(async (_codes, _corpId, refs) =>
       refs ? candidates.filter(item => refs.some(ref => ref.processInstanceId === item.processInstanceId && ref.taskId === item.taskId)) : candidates),
+    findApproverProfiles: vi.fn<ApprovalTimeoutMonitorDependencies['findApproverProfiles']>().mockImplementation(async (_corpId, ids) =>
+      ids.includes('approver-1') ? [{ userId: 'approver-1', name: '测试审批人' }] : []),
     claimDeliveries: vi.fn<ApprovalTimeoutMonitorDependencies['claimDeliveries']>()
       .mockImplementation(async (_target, items) => items.map(({ processInstanceId, alertPhase }) => ({ processInstanceId, alertPhase, attemptCount: 1 }))),
     renewDeliveries: vi.fn<ApprovalTimeoutMonitorDependencies['renewDeliveries']>().mockImplementation(async (_target, claims) => claims),
@@ -47,6 +52,8 @@ beforeEach(() => {
   state.config.DINGTALK_CORP_ID = 'corp-1';
   state.config.APPROVAL_TIMEOUT_PROCESS_CODES = 'PROC-TEST';
   state.config.APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS = '';
+  state.config.APPROVAL_TIMEOUT_ES_USER_IDS = '';
+  state.config.APPROVAL_TIMEOUT_ZH_USER_IDS = '';
   state.query.mockReset();
   state.send.mockReset().mockResolvedValue(undefined);
   state.sendGroup.mockReset().mockResolvedValue(undefined);
@@ -129,21 +136,113 @@ describe('approval timeout reminders', () => {
       expect.stringMatching(/第一单[\s\S]+第二单[\s\S]+第三单/), ['approver-1', 'approver-2'], chineseTitle);
   });
 
-  it('reroutes a transferred task and group mention before sending the digest', async () => {
+  it('localizes personal messages by the current approver account and keeps a mixed group in one digest', async () => {
     state.config.APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS = 'cid-group';
-    const original = candidate({ title: '转交单据', approverUserId: 'previous-user' });
-    const another = candidate({ processInstanceId: 'instance-2', taskId: 'task-2', title: '原有单据', approverUserId: 'current-user' });
-    const completed = candidate({ processInstanceId: 'instance-3', taskId: 'task-3', title: '已办单据', approverUserId: 'previous-user' });
-    const transferred = { ...original, rawInstance: { tasks: [{ taskId: 'task-1', status: 'RUNNING', userId: 'current-user' }] } };
+    state.config.APPROVAL_TIMEOUT_ES_USER_IDS = ' approver-es, approver-es ; other-account ';
+    const deps = dependencies(75, [
+      candidate({ title: '采购支出', nodeName: 'Revisión', rawInstance: {
+        tasks: [{ taskId: 'task-1', status: 'RUNNING', userId: 'approver-es', userName: 'Ana' }],
+      } }),
+      candidate({ taskId: 'task-2', title: 'Solicitud de compra' }),
+    ]);
+    await monitorApprovalTimeouts(deps);
+    expect(deps.send).toHaveBeenCalledTimes(2);
+    expect(deps.send).toHaveBeenCalledWith(['approver-es'], expect.stringContaining('Etapa: Revisión · Responsable: Ana · Tiempo de espera: 75 h 0 min'), spanishTitle);
+    const spanish = deps.send.mock.calls[0][1];
+    expect(spanish).toContain('[Ver aprobación]');
+    expect(spanish).not.toMatch(/首次提醒时限|每满 24 小时/);
+    expect(deps.send).toHaveBeenCalledWith(['approver-1'], expect.stringContaining('Solicitud de compra · 节点：负责人审批'), chineseTitle);
+    expect(deps.sendGroup).toHaveBeenCalledTimes(1);
+    expect(deps.sendGroup).toHaveBeenCalledWith('cid-group', expect.stringMatching(/Ver aprobación[\s\S]+查看审批/),
+      ['approver-es', 'approver-1'], `${chineseTitle} / ${spanishTitle}`);
+  });
+
+  it('uses the current account name for display and language without configuring IDs', async () => {
+    state.config.APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS = 'cid-group';
+    const deps = dependencies(72, [
+      candidate({
+        rawInstance: { tasks: [{ taskId: 'task-1', status: 'RUNNING', userId: 'latin-account' }] },
+        rawTask: { userId: 'approver-1', userName: '旧审批人' },
+      }),
+      candidate({ taskId: 'task-2', approverUserId: 'chinese-account' }),
+      candidate({ taskId: 'task-3', approverUserId: 'single-name-account' }),
+    ]);
+    deps.findApproverProfiles.mockResolvedValue([
+      { userId: 'latin-account', name: 'LUCÍA.GÓMEZ（露西亚）' },
+      { userId: 'chinese-account', name: '张三（Leo）' },
+      { userId: 'single-name-account', name: 'Lucía' },
+    ]);
+    await monitorApprovalTimeouts(deps);
+    expect(deps.findApproverProfiles).toHaveBeenCalledTimes(1);
+    expect(deps.findApproverProfiles).toHaveBeenCalledWith('corp-1', ['latin-account', 'chinese-account', 'single-name-account']);
+    expect(deps.send).toHaveBeenCalledWith(['latin-account'], expect.stringContaining('Responsable: LUCÍA.GÓMEZ（露西亚）'), spanishTitle);
+    expect(deps.send.mock.calls[0][1]).not.toContain('旧审批人');
+    expect(deps.send).toHaveBeenCalledWith(['chinese-account'], expect.stringContaining('待审批人：张三（Leo）'), chineseTitle);
+    expect(deps.send).toHaveBeenCalledWith(['single-name-account'], expect.stringContaining('Responsable: Lucía'), spanishTitle);
+    expect(deps.sendGroup).toHaveBeenCalledWith('cid-group', expect.stringContaining('LUCÍA.GÓMEZ（露西亚）'),
+      ['latin-account', 'chinese-account', 'single-name-account'], `${chineseTitle} / ${spanishTitle}`);
+  });
+
+  it('honors a Chinese account override for a Latin display name', async () => {
+    state.config.APPROVAL_TIMEOUT_ZH_USER_IDS = 'approver-1';
+    state.config.APPROVAL_TIMEOUT_ES_USER_IDS = 'approver-1';
+    const deps = dependencies();
+    deps.findApproverProfiles.mockResolvedValue([{ userId: 'approver-1', name: 'Leo' }]);
+    await monitorApprovalTimeouts(deps);
+    expect(deps.send).toHaveBeenCalledWith(['approver-1'], expect.stringContaining('待审批人：Leo'), chineseTitle);
+  });
+
+  it.each([
+    ['（露西亚）Lucía Gómez', spanishTitle],
+    ['Leo（昵称）张三', chineseTitle],
+    ['(露西亚（别名）) Lucía Gómez', spanishTitle],
+    ['Lucía Gómez（露西亚', chineseTitle],
+  ])('chooses the locale using the text outside balanced aliases for %s', async (name, expectedTitle) => {
+    const deps = dependencies();
+    deps.findApproverProfiles.mockResolvedValue([{ userId: 'approver-1', name }]);
+    await monitorApprovalTimeouts(deps);
+    expect(deps.send).toHaveBeenCalledWith(['approver-1'], expect.stringContaining(name), expectedTitle);
+  });
+
+  it('ignores a legacy archived name paired with the new ID after transfer', async () => {
+    state.config.APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS = 'cid-group';
+    const legacyRow = {
+      ...candidate({ approverUserId: 'new-user',
+        rawTask: { userId: 'old-user', userName: '旧审批人' },
+        rawInstance: { tasks: [{ taskId: 'task-1', status: 'RUNNING', userId: 'new-user' }] },
+      }),
+      approverUserName: '旧审批人',
+    };
+    const deps = dependencies(72, [legacyRow]);
+    deps.findApproverProfiles.mockResolvedValue([]);
+    await monitorApprovalTimeouts(deps);
+    expect(deps.send).toHaveBeenCalledWith(['new-user'], expect.stringContaining('待审批人：new-user'), chineseTitle);
+    expect(deps.sendGroup).toHaveBeenCalledWith('cid-group', expect.not.stringContaining('旧审批人'), ['new-user'], chineseTitle);
+  });
+
+  it.each([
+    { from: 'chinese-user', to: 'spanish-user', name: 'Ana', title: spanishTitle, approver: 'Responsable: Ana', link: 'Ver aprobación' },
+    { from: 'spanish-user', to: 'chinese-user', name: '王五', title: chineseTitle, approver: '待审批人：王五', link: '查看审批' },
+  ])('reroutes a transferred task from $from to $to with the new language and group mention', async ({ from, to, name, title, approver, link }) => {
+    state.config.APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS = 'cid-group';
+    const original = candidate({ title: '转交单据', approverUserId: from });
+    const another = candidate({ processInstanceId: 'instance-2', taskId: 'task-2', title: '原有单据', approverUserId: to });
+    const completed = candidate({ processInstanceId: 'instance-3', taskId: 'task-3', title: '已办单据', approverUserId: from });
+    const transferred = { ...original, rawInstance: { tasks: [{ taskId: 'task-1', status: 'RUNNING', userId: to, userName: name }] } };
     const deps = dependencies(72, [transferred, another]);
+    deps.findApproverProfiles.mockImplementation(async (_corpId, ids) => [
+      { userId: 'spanish-user', name: 'Ana' }, { userId: 'chinese-user', name: '王五' },
+    ].filter(profile => ids.includes(profile.userId)));
     deps.findCandidates.mockResolvedValueOnce([original, another, completed]);
 
     expect(await monitorApprovalTimeouts(deps)).toEqual({ scanned: 3, eligible: 3, sent: 2, failed: 0 });
     expect(deps.send).toHaveBeenCalledTimes(1);
-    expect(deps.send).toHaveBeenCalledWith(['current-user'], expect.stringMatching(/原有单据[\s\S]+转交单据/), chineseTitle);
+    expect(deps.send).toHaveBeenCalledWith([to], expect.stringMatching(/原有单据[\s\S]+转交单据/), title);
+    expect(deps.send.mock.calls[0][1]).toContain(approver);
     expect(deps.sendGroup).toHaveBeenCalledTimes(1);
-    expect(deps.sendGroup).toHaveBeenCalledWith('cid-group', expect.not.stringContaining('已办单据'), ['current-user'], chineseTitle);
-    expect(deps.finishDeliveries).toHaveBeenCalledWith(expect.objectContaining({ recipientUserId: 'previous-user' }),
+    expect(deps.sendGroup).toHaveBeenCalledWith('cid-group', expect.stringContaining(link), [to], title);
+    expect(deps.sendGroup.mock.calls[0][1]).not.toContain('已办单据');
+    expect(deps.finishDeliveries).toHaveBeenCalledWith(expect.objectContaining({ recipientUserId: from }),
       expect.arrayContaining([expect.objectContaining({ processInstanceId: original.processInstanceId })]),
       null, 'APPROVAL_TIMEOUT_TASK_CHANGED');
   });
@@ -258,6 +357,7 @@ describe('approval timeout reminders', () => {
 
   it('removes a lost lease from a partially renewed group digest and its mentions', async () => {
     state.config.APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS = 'cid-group';
+    state.config.APPROVAL_TIMEOUT_ES_USER_IDS = 'approver-2';
     const deps = dependencies(72, [
       candidate({ processInstanceId: 'expired-instance', title: '过期条目' }),
       candidate({ processInstanceId: 'active-instance', title: '有效条目', approverUserId: 'approver-2' }),
@@ -266,7 +366,7 @@ describe('approval timeout reminders', () => {
       ? claims.filter(claim => claim.processInstanceId === 'active-instance') : claims);
     await monitorApprovalTimeouts(deps);
     expect(deps.sendGroup).toHaveBeenCalledTimes(1);
-    expect(deps.sendGroup).toHaveBeenCalledWith('cid-group', expect.stringContaining('有效条目'), ['approver-2'], chineseTitle);
+    expect(deps.sendGroup).toHaveBeenCalledWith('cid-group', expect.stringContaining('有效条目'), ['approver-2'], spanishTitle);
     expect(deps.sendGroup.mock.calls[0][1]).not.toContain('过期条目');
     const groupFinish = deps.finishDeliveries.mock.calls.find(([target]) => target.recipientUserId.startsWith('group:'));
     expect(groupFinish?.[1].map(claim => claim.processInstanceId)).toEqual(['active-instance']);
@@ -340,12 +440,15 @@ describe('approval timeout reminders', () => {
     expect(deps.send).not.toHaveBeenCalled();
   });
 
-  it('accepts the current running task from the latest snapshot', async () => {
-    const deps = dependencies(72, [candidate({ rawInstance: {
-      tasks: [{ taskId: 'task-1', status: 'RUNNING', userId: 'approver-1' }],
-    } })]);
+  it('uses the raw task name when its account matches the current approver and no profile exists', async () => {
+    const deps = dependencies(72, [candidate({
+      rawInstance: { tasks: [{ taskId: 'task-1', status: 'RUNNING', userId: 'approver-1' }] },
+      rawTask: { userId: 'approver-1', userName: '同账号姓名' },
+    })]);
+    deps.findApproverProfiles.mockResolvedValue([]);
     await monitorApprovalTimeouts(deps);
     expect(deps.send).toHaveBeenCalledTimes(1);
+    expect(deps.send).toHaveBeenCalledWith(['approver-1'], expect.stringContaining('待审批人：同账号姓名'), chineseTitle);
   });
 
   it('distinguishes reentered tasks while keeping long task IDs within schema limits', async () => {
@@ -392,24 +495,28 @@ describe('timeout SQL contracts (mocked database)', () => {
     });
     expect(config.APPROVAL_TIMEOUT_MINUTES).toBe(4320);
     expect(config.APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS).toBe('');
+    expect(config.APPROVAL_TIMEOUT_ES_USER_IDS).toBe('');
+    expect(config.APPROVAL_TIMEOUT_ZH_USER_IDS).toBe('');
   });
 
   it('wires the real monitor defaults to the 24-hour repeat claim and task recipient', async () => {
     const rows = [{
       corp_id: 'corp-1', process_instance_id: 'i', process_code: 'PROC-TEST', title: '测试审批',
       task_id: 't', start_time: new Date(0), approver_user_id: 'approver-1',
-      approver_user_name: '测试审批人', node_name: null, task_raw_payload: {}, instance_raw_payload: {},
+      node_name: null, task_raw_payload: {}, instance_raw_payload: {},
     }];
     state.query.mockResolvedValueOnce({ rows })
+      .mockResolvedValueOnce({ rows: [{ userId: 'approver-1', name: '测试审批人' }] })
       .mockImplementationOnce(async (_sql, params) => ({ rows: JSON.parse(params[3]).map((item: object) => ({ ...item, attemptCount: 1 })) }))
       .mockResolvedValueOnce({ rows })
       .mockImplementationOnce(async (_sql, params) => ({ rows: JSON.parse(params[3]) }))
       .mockResolvedValueOnce({ rowCount: 1 });
     expect((await monitorApprovalTimeouts()).sent).toBe(1);
-    expect(state.query.mock.calls[1][1][4]).toBe(1440);
-    expect(state.query.mock.calls[2][1]).toEqual([['PROC-TEST'], 'corp-1', JSON.stringify([{ processInstanceId: 'i', taskId: 't' }])]);
-    expect(state.query.mock.calls[3][0]).toContain("AND n.updated_at >= clock_timestamp() - interval '15 minutes'");
-    expect(state.query.mock.calls[4][0]).toContain("SET status = $6::varchar, sent_at = CASE WHEN $6::varchar = 'sent'");
+    expect(state.query.mock.calls[1][1]).toEqual(['corp-1', ['approver-1']]);
+    expect(state.query.mock.calls[2][1][4]).toBe(1440);
+    expect(state.query.mock.calls[3][1]).toEqual([['PROC-TEST'], 'corp-1', JSON.stringify([{ processInstanceId: 'i', taskId: 't' }])]);
+    expect(state.query.mock.calls[4][0]).toContain("AND n.updated_at >= clock_timestamp() - interval '15 minutes'");
+    expect(state.query.mock.calls[5][0]).toContain("SET status = $6::varchar, sent_at = CASE WHEN $6::varchar = 'sent'");
     expect(state.send).toHaveBeenCalledWith(['approver-1'], expect.stringContaining('待审批人：测试审批人'), chineseTitle);
   });
 

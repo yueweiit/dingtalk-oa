@@ -118,6 +118,8 @@ export const configSchema = z.object({
   DINGTALK_ALERT_CLIENT_SECRET: z.string().trim().min(1).optional(),
   DINGTALK_ALERT_RECIPIENT_USER_IDS: z.string().default(''),
   APPROVAL_TIMEOUT_PROCESS_CODES: z.string().default(''),
+  APPROVAL_TIMEOUT_ES_USER_IDS: z.string().default(''),
+  APPROVAL_TIMEOUT_ZH_USER_IDS: z.string().default(''),
   APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS: z.string().default(''),
   APPROVAL_TIMEOUT_MONITOR_CRON: z.string().default('*/30 * * * *'),
   APPROVAL_TIMEOUT_MINUTES: z.coerce.number().int().min(1).default(72 * 60),

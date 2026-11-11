@@ -9,9 +9,10 @@ import {
   type AlertDeliveryTarget,
   type ClaimedAlertDelivery,
 } from '../db/queries/alert-notification.js';
+import { findCurrentSnapshotNames } from '../db/queries/user-snapshot.js';
 import { sendAlertChatMessage, sendAlertGroupMessage } from '../dingtalk/alert-robot.js';
 import { parseDingTalkTime } from '../normalize/instance-normalizer.js';
-import { buildApprovalTimeoutMessages, type ApprovalTimeoutMessageItem } from './approval-timeout-message.js';
+import { buildApprovalTimeoutMessages, type ApprovalTimeoutLocale, type ApprovalTimeoutMessageItem } from './approval-timeout-message.js';
 
 const ALERT_TYPE = 'approval_timeout';
 const REPEAT_MINUTES = 24 * 60;
@@ -24,7 +25,6 @@ export interface ApprovalTimeoutCandidate {
   taskId: string;
   taskStartTime: Date | null;
   approverUserId: string | null;
-  approverUserName: string | null;
   nodeName: string | null;
   rawTask: unknown;
   rawInstance: unknown;
@@ -33,6 +33,7 @@ export interface ApprovalTimeoutCandidate {
 export interface ApprovalTimeoutMonitorDependencies {
   now: () => Date;
   findCandidates: typeof findRunningApprovalTimeoutCandidates;
+  findApproverProfiles: typeof findCurrentSnapshotNames;
   claimDeliveries: (target: AlertDeliveryTarget, items: AlertDeliveryClaim[]) => Promise<ClaimedAlertDelivery[]>;
   renewDeliveries: typeof renewAlertDeliveryBatch;
   finishDeliveries: typeof finishAlertDeliveryBatch;
@@ -83,6 +84,27 @@ function stringValue(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+function displayName(value: unknown, userId: string): string | null {
+  const name = stringValue(value);
+  return name && name !== userId && name.toLowerCase() !== 'unknown' ? name : null;
+}
+
+function taskNameForAccount(task: Record<string, unknown>, userId: string): string | null {
+  return stringValue(task.userId) === userId ? displayName(task.userName, userId) : null;
+}
+
+function localeFromSnapshotName(name: string | null): ApprovalTimeoutLocale {
+  // 逐层移除配对括号里的别名，保留括号外的全部姓名。
+  let mainName = name ?? '';
+  let previous: string;
+  do {
+    previous = mainName;
+    mainName = mainName.replace(/[（(][^（）()]*[）)]/gu, '');
+  } while (mainName !== previous);
+  const letters = mainName.match(/\p{L}/gu);
+  return letters?.length && letters.every(letter => /\p{Script=Latin}/u.test(letter)) ? 'es' : 'zh-CN';
+}
+
 function currentTaskSnapshot(candidate: ApprovalTimeoutCandidate): {
   task: Record<string, unknown>;
   authoritative: boolean;
@@ -114,13 +136,12 @@ export async function findRunningApprovalTimeoutCandidates(
       task_id: string;
       start_time: Date | null;
       approver_user_id: string | null;
-      approver_user_name: string | null;
       node_name: string | null;
       task_raw_payload: unknown;
       instance_raw_payload: unknown;
     }>(
       `SELECT i.corp_id, i.process_instance_id, i.process_code, i.title,
-              t.task_id, t.start_time, t.approver_user_id, t.approver_user_name, t.node_name,
+              t.task_id, t.start_time, t.approver_user_id, t.node_name,
               t.raw_payload AS task_raw_payload,
               i.raw_payload AS instance_raw_payload
        FROM ding_approval_instance i
@@ -146,7 +167,6 @@ export async function findRunningApprovalTimeoutCandidates(
       taskId: row.task_id,
       taskStartTime: row.start_time,
       approverUserId: row.approver_user_id,
-      approverUserName: row.approver_user_name,
       nodeName: row.node_name,
       rawTask: row.task_raw_payload,
       rawInstance: row.instance_raw_payload,
@@ -157,6 +177,7 @@ export async function findRunningApprovalTimeoutCandidates(
 const defaultDependencies: ApprovalTimeoutMonitorDependencies = {
   now: () => new Date(),
   findCandidates: findRunningApprovalTimeoutCandidates,
+  findApproverProfiles: findCurrentSnapshotNames,
   claimDeliveries: (target, items) => claimAlertDeliveryBatch(target, items, REPEAT_MINUTES),
   renewDeliveries: renewAlertDeliveryBatch,
   finishDeliveries: finishAlertDeliveryBatch,
@@ -179,6 +200,9 @@ export async function monitorApprovalTimeouts(
     address,
     recipientUserId: `group:${createHash('sha256').update(address).digest('hex')}`,
   }));
+  const spanishUserIds = new Set(parseList(config.APPROVAL_TIMEOUT_ES_USER_IDS));
+  const chineseUserIds = new Set(parseList(config.APPROVAL_TIMEOUT_ZH_USER_IDS));
+  const snapshotNames = new Map<string, string | null>();
   const processScope = new Set(processCodes);
   const now = dependencies.now();
   const timeoutMinutes = config.APPROVAL_TIMEOUT_MINUTES;
@@ -218,8 +242,10 @@ export async function monitorApprovalTimeouts(
     const approverUserId = snapshot.authoritative
       ? stringValue(snapshot.task.userId)
       : stringValue(candidate.approverUserId);
+    // 历史归档姓名可能属于转交前的账号，原始任务须用同一份数据证明 ID 和姓名的关联。
     const approverUserName = approverUserId
-      ? stringValue(snapshot.authoritative ? snapshot.task.userName : candidate.approverUserName)
+      ? taskNameForAccount(snapshot.task, approverUserId)
+        ?? taskNameForAccount(asRecord(candidate.rawTask), approverUserId)
       : null;
     // 固定长度标识兼容 alert_phase VARCHAR(64)，重进同一任务时按实际开始时间区分。
     const taskKey = createHash('sha256').update(JSON.stringify([
@@ -231,6 +257,7 @@ export async function monitorApprovalTimeouts(
       nodeName: candidate.nodeName,
       approver: approverUserName,
       approverUserId,
+      locale: 'zh-CN',
       waitedMs,
       approvalUrl: approvalUrl.href,
       delivery: {
@@ -247,9 +274,35 @@ export async function monitorApprovalTimeouts(
     };
   };
 
-  for (const candidate of candidates) {
-    const item = resolve(candidate);
-    if (!item) continue;
+  const resolveItems = async (rows: ApprovalTimeoutCandidate[]) => {
+    const items = rows.flatMap(row => {
+      const item = resolve(row);
+      return item ? [item] : [];
+    });
+    const missingIds = [...new Set(items.flatMap(({ approverUserId }) =>
+      approverUserId && !snapshotNames.has(approverUserId) ? [approverUserId] : []))];
+    if (missingIds.length) {
+      try {
+        const profiles = await dependencies.findApproverProfiles(corpId, missingIds);
+        const names = new Map(profiles.map(profile => [profile.userId, displayName(profile.name, profile.userId)]));
+        for (const id of missingIds) snapshotNames.set(id, names.get(id) ?? null);
+      } catch (error) {
+        console.warn('[ApprovalTimeout] APPROVAL_TIMEOUT_APPROVER_NAME_LOOKUP_FAILED', errorMessage(error));
+      }
+    }
+    for (const item of items) {
+      const id = item.approverUserId;
+      if (!id) continue;
+      const name = snapshotNames.get(id) ?? null;
+      item.approver = name ?? item.approver;
+      if (chineseUserIds.has(id)) item.locale = 'zh-CN';
+      else if (spanishUserIds.has(id)) item.locale = 'es';
+      else item.locale = localeFromSnapshotName(name);
+    }
+    return items;
+  };
+
+  for (const item of await resolveItems(candidates)) {
     result.eligible++;
     if (item.approverUserId) {
       queue(deliveryGroups, 'personal', item.approverUserId, item.approverUserId, item);
@@ -271,11 +324,7 @@ export async function monitorApprovalTimeouts(
 
   const refreshPart = async (group: DeliveryGroup, items: ClaimedTimeoutDelivery[], allowReroute: boolean) => {
     const rows = await dependencies.findCandidates(processCodes, corpId, items.map(item => item.ref));
-    const currentByTask = new Map<string, PendingDelivery>();
-    for (const row of rows) {
-      const item = resolve(row);
-      if (item) currentByTask.set(taskRefKey(item.ref), item);
-    }
+    const currentByTask = new Map((await resolveItems(rows)).map(item => [taskRefKey(item.ref), item]));
     const refreshed: ClaimedTimeoutDelivery[] = [];
     const obsolete: ClaimedAlertDelivery[] = [];
     for (const item of items) {

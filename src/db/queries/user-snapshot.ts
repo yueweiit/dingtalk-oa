@@ -53,6 +53,21 @@ export async function getCurrentSnapshot(
   return client ? run(client) : withClient(run);
 }
 
+/** 批量查询同企业、指定账号的当前成功姓名。 */
+export async function findCurrentSnapshotNames(
+  corpId: string, userIds: string[],
+): Promise<Array<{ userId: string; name: string }>> {
+  if (!userIds.length) return [];
+  return withClient(async client => (await client.query<{ userId: string; name: string }>(
+    `SELECT user_id AS "userId", BTRIM(name) AS name
+     FROM ding_user_snapshot
+     WHERE corp_id = $1 AND is_current = true AND fetch_status = 'success'
+       AND NULLIF(BTRIM(name), '') IS NOT NULL AND LOWER(BTRIM(name)) <> 'unknown'
+       AND user_id = ANY($2::varchar[])`,
+    [corpId, userIds],
+  )).rows);
+}
+
 export async function upsertSnapshot(params: {
   corp_id: string;
   user_id: string;

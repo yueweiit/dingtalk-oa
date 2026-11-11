@@ -4,6 +4,7 @@ import { normalizeTasks } from '../normalize/task-normalizer.js';
 import type { ApprovalTask } from '../dingtalk/types.js';
 import { upsertTask } from './queries/approval-task.js';
 import { claimAlertDeliveryBatch, finishAlertDeliveryBatch, renewAlertDeliveryBatch, type AlertDeliveryClaim, type AlertDeliveryTarget } from './queries/alert-notification.js';
+import { findCurrentSnapshotNames } from './queries/user-snapshot.js';
 import { findRunningApprovalTimeoutCandidates, monitorApprovalTimeouts } from '../jobs/approval-timeout-monitor.js';
 
 const state = vi.hoisted(() => ({ client: null as pg.Client | null }));
@@ -16,6 +17,8 @@ vi.mock('./pool.js', () => ({
 vi.mock('../config/index.js', () => ({ getConfig: () => ({
   DINGTALK_CORP_ID: 'corp-test', APPROVAL_TIMEOUT_PROCESS_CODES: 'PROC-TEST',
   APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS: 'cid-test', APPROVAL_TIMEOUT_MINUTES: 4320,
+  APPROVAL_TIMEOUT_ES_USER_IDS: '',
+  APPROVAL_TIMEOUT_ZH_USER_IDS: '',
 }) }));
 
 // 仅显式提供获准的一次性 loopback 测试库时运行。只创建会话临时表，不运行迁移或触碰 public 表。
@@ -45,6 +48,9 @@ describe.skipIf(!databaseUrl)('approval timeout task persistence (isolated Postg
         corp_id VARCHAR(64), process_instance_id VARCHAR(128), process_code VARCHAR(128), title TEXT,
         status VARCHAR(32), deleted_at TIMESTAMPTZ, create_time TIMESTAMPTZ, raw_payload JSONB
       );
+      CREATE TEMP TABLE ding_user_snapshot (
+        corp_id VARCHAR(64), user_id VARCHAR(128), name VARCHAR(256), is_current BOOLEAN, fetch_status VARCHAR(32)
+      );
       CREATE TEMP TABLE ding_alert_notification (
         id BIGSERIAL PRIMARY KEY,
         corp_id VARCHAR(64) NOT NULL, process_instance_id VARCHAR(128) NOT NULL, alert_type VARCHAR(64) NOT NULL,
@@ -56,7 +62,7 @@ describe.skipIf(!databaseUrl)('approval timeout task persistence (isolated Postg
   });
   afterAll(async () => { await state.client?.end(); state.client = null; });
   beforeEach(async () => {
-    await state.client!.query('TRUNCATE pg_temp.ding_approval_task, pg_temp.ding_approval_instance, pg_temp.ding_alert_notification');
+    await state.client!.query('TRUNCATE pg_temp.ding_approval_task, pg_temp.ding_approval_instance, pg_temp.ding_alert_notification, pg_temp.ding_user_snapshot');
   });
 
   const initialStart = '2026-11-01T08:00:00+08:00';
@@ -79,6 +85,7 @@ describe.skipIf(!databaseUrl)('approval timeout task persistence (isolated Postg
   function reminderDependencies() {
     return {
       now: () => new Date('2026-11-10T08:00:00+08:00'), findCandidates: findRunningApprovalTimeoutCandidates,
+      findApproverProfiles: findCurrentSnapshotNames,
       claimDeliveries: (target: AlertDeliveryTarget, items: AlertDeliveryClaim[]) => claimAlertDeliveryBatch(target, items, 1440),
       renewDeliveries: renewAlertDeliveryBatch,
       finishDeliveries: finishAlertDeliveryBatch, send: vi.fn().mockResolvedValue(undefined),
@@ -150,6 +157,32 @@ describe.skipIf(!databaseUrl)('approval timeout task persistence (isolated Postg
     expect(rows[2]).toEqual(rows[3]);
     expect(rows[0].batch_id).not.toBe(rows[2].batch_id);
     expect((await monitorApprovalTimeouts(deps)).sent).toBe(0);
+  });
+
+  it('uses the current approver’s successful profile in the configured enterprise for name and language', async () => {
+    await persist({ taskId: 'task-test', status: 'RUNNING', userId: 'previous-user', userName: '旧审批人', startTime: initialStart });
+    await latestInstance({ taskId: 'task-test', status: 'RUNNING', userId: 'current-user', startTime: initialStart });
+    await state.client!.query(`INSERT INTO pg_temp.ding_user_snapshot VALUES
+      ('corp-test','current-user','Lucía Gómez（露西亚）',true,'success'),
+      ('corp-test','current-user','旧资料',false,'success'),
+      ('corp-test','current-user','unknown',false,'failed'),
+      ('other-corp','current-user','另一企业人员',true,'success')`);
+    const deps = reminderDependencies();
+    expect((await monitorApprovalTimeouts(deps)).sent).toBe(2);
+    expect(deps.send).toHaveBeenCalledWith(['current-user'], expect.stringContaining('Responsable: Lucía Gómez（露西亚）'), 'Aprobaciones vencidas');
+    expect(deps.sendGroup).toHaveBeenCalledWith('cid-test', expect.not.stringContaining('旧审批人'), ['current-user'], 'Aprobaciones vencidas');
+  });
+
+  it('does not display a legacy stored name when only the new approver ID is verifiable', async () => {
+    await persist({ taskId: 'task-test', status: 'RUNNING', userId: 'previous-user', userName: '旧审批人', startTime: initialStart });
+    const task = { taskId: 'task-test', status: 'RUNNING', userId: 'current-user', startTime: initialStart };
+    await state.client!.query(`UPDATE pg_temp.ding_approval_task SET approver_user_id=$1, raw_payload=$2::jsonb
+      WHERE task_id='task-test'`, [task.userId, JSON.stringify(task)]);
+    await latestInstance(task);
+    const deps = reminderDependencies();
+    expect((await monitorApprovalTimeouts(deps)).sent).toBe(2);
+    expect(deps.send).toHaveBeenCalledWith(['current-user'], expect.stringContaining('待审批人：current-user'), '审批超时汇总');
+    expect(deps.sendGroup).toHaveBeenCalledWith('cid-test', expect.not.stringContaining('旧审批人'), ['current-user'], '审批超时汇总');
   });
 
   it('reclaims only an individually due task and ignores an old attempt result', async () => {
