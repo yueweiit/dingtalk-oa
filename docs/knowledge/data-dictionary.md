@@ -19,6 +19,8 @@
 | 实例/任务人员姓名、部门与节点名称 | VARCHAR（原有列） | 保留已有非空值。姓名可用成功资料补全，部门归属来自审批记录，部门名可为已知 ID 的字典标签。无证据仍可为 NULL，见 [补全规则](../modules/approval-ingestion/README.md#人员部门和节点空值补全) |
 | 用户失败 fetch_status / fetch_error / failure_count / first_failed_at / last_failed_at | VARCHAR / TEXT / BIGINT / TIMESTAMPTZ | ding_user_fetch_failure 独立保存错误历史；最近相同错误合并次数、不同错误新增行，不表示错误当前仍存在；旧失败行通过 source_snapshot_id 追溯，详见 [人员规则](../modules/metadata-organization/README.md#用户快照与失败记录) |
 | 用户失败 source_snapshot_id / source_snapshot_payload | BIGINT / JSONB（可空） | 旧失败快照的历史来源 ID 及清理前完整原行；清理后 ID 不再对应快照表实体，JSON 保留原始资料及版本时间供人工追溯。新发生的失败不生成源快照，两个字段为空；见 [清理契约](../modules/metadata-organization/README.md#旧失败快照的独立清理) |
+| 离职 source_process_instance_id / departed_on / user_id / identity_method | VARCHAR(128) / DATE / VARCHAR(128) / TEXT | 企业内关联来源审批；离职日期取自同一份已通过的原始详情，按当地日历日生效；员工 ID 与确认方式同时为空或有值，确认方式为 `originator` 或 `manual`；见 [离职记录](../modules/metadata-organization/README.md#审批离职记录) |
+| 离职 candidate_user_id / identity_review_required | VARCHAR(128) / BOOLEAN | 墨西哥姓名匹配结果仅作候选，员工 ID 保持空；人工确认出现人员冲突时保留原确认和历史姓名，并标记待复核，期间暂停离职生效 |
 | 字段 field_id / field_name / field_type | VARCHAR(128/256/64) | 稳定组件 ID 与展示名、组件类型；源表单名称可能多语言但不是翻译资源 |
 | 附件 file_id / attachment_origin / sha256 | VARCHAR(256) / VARCHAR(16) / CHAR(64) | 同一企业和实例内按 file_id 去重；attachment_origin 为 form 或 comment |
 | 附件 declared_size / actual_size | BIGINT | 源声明与下载字节数；原件下载时有大小比对 |

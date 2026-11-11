@@ -62,6 +62,32 @@ WHERE fetch_status IS DISTINCT FROM 'success';
 
 2026-11-10 清理验证：项目类型检查及快照写入/规范化、人员视图、迁移安全契约共 37 项离线测试通过。用户快照隔离库测试共 28 项（其中清理新增 17 项），覆盖完整原行归档、成功历史保留、归档缺失/错配、删除后事务失败的整阶段回滚、CASCADE / SET NULL 外键、触发器/规则拦截、前置校验、空失败集合和清理后的正常写入；未提供获准测试库，28 项均跳过。本次未连接生产数据库、执行清理或验证真实 SQL 执行效果。
 
+## 审批离职记录
+
+`ding_user_departure` 按企业和来源实例保存已通过的离职申请、表单姓名、当地离职日期、关联员工 ID 及确认方式。历史回填和标准审批归档共用[同一写入入口](../../../src/db/queries/user-departure.ts)，按[固定流程码和组件 ID](../../../src/normalize/user-departure.ts) 处理两种表单。
+
+- 中国「离职」由本人发起，用原始审批详情的发起人 ID 和表单的「员工名称」「批准离职日期」。缺少发起人 ID 或详情中的发起人 ID 互相冲突时，保留待核对。
+- 墨西哥「离职」由 HR 或主管代填，用「员工名称」「钉钉名字」「实际离职日期」。两个不同姓名在同企业历史成功快照中只指向同一个非代提账号时，记录 `candidate_user_id` 供 HR 核对。HR 确认后写入实际员工 ID。重跑保留已确认姓名和 ID，字段暂缺、空白和大小写差异保持原确认。后续同一姓名字段出现实质冲突时，保留原确认并标记待复核，重新人工确认后才能生效。
+- 离职日期和审批通过结果必须来自同一份原始详情。当前详情日期缺失或无效时保留待确认。来源仍为未删除且通过的审批、员工 ID 已确认且无待复核标记、当地离职日期已到时，审批补取和手工同步都跳过用户详情刷新。中国按 `Asia/Shanghai`，墨西哥按 `America/Mexico_City`。历史成功快照及错误历史保留。此流程当前只依据离职审批，无复职数据来源。
+- 来源审批软删除后，离职记录保留供追溯并停止生效。外键限制硬删除仍有关联离职记录的审批实例。
+
+部署先应用 [离职迁移](../../../migrations/20261111000000_create_ding_user_departure.cjs)，再运行新版服务或用户同步脚本。已有数据库使用指定迁移名预览和执行，避免将其他待迁移文件一并应用。
+
+```bash
+npm run migrate:up -- 20261111000000_create_ding_user_departure --no-check-order --dry-run
+npm run migrate:up -- 20261111000000_create_ding_user_departure --no-check-order
+```
+
+历史回填默认预览，可按企业和实例定位。命令仅读取本地归档及历史快照，`--apply` 以批次事务幂等写入。`approved` 是已通过的源单数，`identified` 是已确认且无需复核的身份数，`candidates` 是有姓名匹配候选的单数。`pendingIdentity` 包括缺少身份和身份待复核的单据，`pendingDate` 是缺有效离职日期的单数。迁移禁止自动删除离职表，以保留人工确认结果。
+
+```bash
+npm run backfill:departures -- --corp-id <corpId> --dry-run
+npm run backfill:departures -- --corp-id <corpId> --apply
+npm run backfill:departures -- --corp-id <corpId> --instance-id <instanceId> --confirm-user-id <userId> --apply
+```
+
+查看待核对单据时，可在所属企业范围内查询 `ding_user_departure` 中 `user_id IS NULL OR identity_review_required OR departed_on IS NULL` 的记录，通过 `source_process_instance_id` 核对原审批。人工确认命令仅接受原始详情明确通过且包含员工姓名信息的单条墨西哥离职审批。
+
 ## 审批元数据历史回填
 
 [同步脚本](../../../scripts/sync-metadata.ts) 包括根部门的直接成员；用户资料 hash 未变化也会在本轮末尾执行一次分批审批空值补全，不再因 continue 跳过姓名回填，也不再用 COALESCE 保留空字符串。没有发现新用户时，仍可使用已保存的成功资料补齐审批空值。用户快照新版本计数与审批回填计数分开输出；手工同步仍会访问钉钉、写用户/部门及审批数据，不能当作只读检查。
