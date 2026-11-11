@@ -35,6 +35,8 @@
 
 [用户快照集成测试](../../src/db/user-snapshot.integration.test.ts) 需要显式获准的 USER_SNAPSHOT_TEST_DATABASE_URL，限定 loopback 和 user_snapshot_test / user_snapshot_test_*，拒绝连接参数覆盖。在测试自建随机 schema 中执行两阶段迁移、区间整理、并发读取/写入和回滚用例；另验证旧失败清理的完整 JSON 归档、成功历史保留、错配回滚、外键/触发器/规则拦截及后续正常写入。结束时仅删除该 schema，禁止使用业务库。第二阶段校验必须在第一阶段提交后执行，不能用外层事务把两阶段重新包在一起；独立清理也须保留单阶段事务。未提供获准库时应跳过；[离线迁移检查](../../src/db/user-snapshot-migration.test.ts) 生成 SQL 并用模拟数据库检验实际迁移器的事务边界和清理安全契约，不连接真实数据库。
 
+[审批元数据集成测试](../../src/db/approval-enrichment.integration.test.ts) 同样仅使用获准的 USER_SNAPSHOT_TEST_DATABASE_URL、loopback 和 user_snapshot_test / user_snapshot_test_* 数据库，并建立独立 approval_metadata_it_* schema。覆盖调岗后延迟采集导致的历史部门误判、多种空白字符、双连接并发软删除、转交、幂等、只读预览及保存点回滚。没有获准测试库时必须跳过，真实 SQL 行为以集成测试结果为准。
+
 ## 文档维护映射
 
 | 发生变化 | 优先更新 |

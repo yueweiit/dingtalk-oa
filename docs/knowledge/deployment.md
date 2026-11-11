@@ -18,6 +18,7 @@
 | npm run dev / npm start | 启动业务服务，可能建表、同步、入队和通知 |
 | npm run migrate:up / migrate:down | 数据库结构/数据变更；财务迁移有拒绝 down 的实现 |
 | npm run sync:templates / sync:users | 调钉钉并写元数据；用户同步还维护部门树与名称 |
+| npm run backfill:metadata | 仅使用本地资料、按企业分批预览审批元数据空值；显式 --apply 才写入，无钉钉调用或通知；参数与证据口径见 [人员模块](../modules/metadata-organization/README.md#审批元数据历史回填) |
 | npm run fetch / backfill | 拉取审批写数据库，消耗钉钉调用配额 |
 | npm run finance:backfill | 发现、排期、恢复财务历史；参数语义见专项文档 |
 | npm run archive:attachments | 同步清单并下载/上传附件；批量模式和精确目标模式不同 |

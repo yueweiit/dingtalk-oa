@@ -16,6 +16,7 @@
 | 视图 approval_instances_v2.updated_at | TIMESTAMPTZ | 可包含范围注册与首次暴露时间；用于逻辑可见性增量 |
 | 任务 approver_user_id / end_time | VARCHAR(128) / TIMESTAMPTZ | 任务处理人及任务结束时间；人员列可能因 COALESCE 保留历史值，提醒优先按当前原始任务快照取人；同一任务有新轮次时间证据时可清空旧结束时间，见 [归档规则](../modules/approval-ingestion/README.md#功能与规则) |
 | 用户 snapshot_hash / valid_from / valid_to / is_current | VARCHAR(64) / TIMESTAMPTZ / BOOLEAN | 姓名、部门、职位、头像的 SHA-256 成功资料版本摘要及有效期间；current 表示最后成功资料，不是用户在职状态；企业+用户仅一条 current，失败不替换资料；union_id 可独立补齐 |
+| 实例/任务人员姓名、部门与节点名称 | VARCHAR（原有列） | 保留已有非空值。姓名可用成功资料补全，部门归属来自审批记录，部门名可为已知 ID 的字典标签。无证据仍可为 NULL，见 [补全规则](../modules/approval-ingestion/README.md#人员部门和节点空值补全) |
 | 用户失败 fetch_status / fetch_error / failure_count / first_failed_at / last_failed_at | VARCHAR / TEXT / BIGINT / TIMESTAMPTZ | ding_user_fetch_failure 独立保存错误历史；最近相同错误合并次数、不同错误新增行，不表示错误当前仍存在；旧失败行通过 source_snapshot_id 追溯，详见 [人员规则](../modules/metadata-organization/README.md#用户快照与失败记录) |
 | 用户失败 source_snapshot_id / source_snapshot_payload | BIGINT / JSONB（可空） | 旧失败快照的历史来源 ID 及清理前完整原行；清理后 ID 不再对应快照表实体，JSON 保留原始资料及版本时间供人工追溯。新发生的失败不生成源快照，两个字段为空；见 [清理契约](../modules/metadata-organization/README.md#旧失败快照的独立清理) |
 | 字段 field_id / field_name / field_type | VARCHAR(128/256/64) | 稳定组件 ID 与展示名、组件类型；源表单名称可能多语言但不是翻译资源 |

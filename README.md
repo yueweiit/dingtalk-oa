@@ -282,6 +282,7 @@ npx tsx scripts/sync-metadata.ts  # 全部同步
 npx tsx check-db.ts     # 查看数据库状态
 
 # 历史数据回填
+npm run backfill:metadata -- --corp-id <corpId> # 预览本地审批资料空值补全，显式 --apply 才写入
 npm run backfill -- --days=365          # 补最近一年
 npm run backfill -- --days=7            # 补最近 7 天
 npm run backfill -- --days=30 --delay-ms=200  # 补 30 天加速模式
