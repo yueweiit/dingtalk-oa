@@ -10,6 +10,8 @@ import { monitorApprovalTimeouts } from './approval-timeout-monitor.js';
 import { refreshCompletedLogisticsApprovals } from './completed-approval-refresh.js';
 
 let scheduledTasks: cron.ScheduledTask[] = [];
+let approvalTimeoutController = new AbortController();
+let approvalTimeoutRun: Promise<void> | undefined;
 
 export function startScheduler(): void {
   const config = getConfig();
@@ -87,17 +89,15 @@ export function startScheduler(): void {
     timezone: 'Asia/Shanghai',
   });
 
-  let approvalTimeoutRunning = false;
+  if (approvalTimeoutController.signal.aborted) approvalTimeoutController = new AbortController();
+  const approvalTimeoutSignal = approvalTimeoutController.signal;
   const approvalTimeoutTask = cron.schedule(config.APPROVAL_TIMEOUT_MONITOR_CRON, async () => {
-    if (approvalTimeoutRunning) return;
-    approvalTimeoutRunning = true;
-    try {
-      await monitorApprovalTimeouts();
-    } catch (error) {
-      console.error('[Scheduler] 审批超时检查失败:', error);
-    } finally {
-      approvalTimeoutRunning = false;
-    }
+    if (approvalTimeoutSignal.aborted || approvalTimeoutRun) return;
+    approvalTimeoutRun = monitorApprovalTimeouts(undefined, approvalTimeoutSignal)
+      .then(() => undefined)
+      .catch(error => console.error('[Scheduler] 审批超时检查失败:', error))
+      .finally(() => { approvalTimeoutRun = undefined; });
+    await approvalTimeoutRun;
   }, {
     timezone: 'Asia/Shanghai',
   });
@@ -150,12 +150,14 @@ export function startScheduler(): void {
   console.log(`  - ${config.APPROVAL_TIMEOUT_MONITOR_CRON}: 审批超时提醒`);
 }
 
-export function stopScheduler(): void {
+export function stopScheduler(): Promise<void> {
+  approvalTimeoutController.abort();
   for (const task of scheduledTasks) {
     task.stop();
   }
   scheduledTasks = [];
   console.log('[Scheduler] 定时任务已停止');
+  return approvalTimeoutRun ?? Promise.resolve();
 }
 
 /**

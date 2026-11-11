@@ -16,6 +16,7 @@ import { buildApprovalTimeoutMessages, type ApprovalTimeoutLocale, type Approval
 
 const ALERT_TYPE = 'approval_timeout';
 const REPEAT_MINUTES = 24 * 60;
+const SCHEDULER_STOPPED = 'APPROVAL_TIMEOUT_SCHEDULER_STOPPED';
 
 export interface ApprovalTimeoutCandidate {
   corpId: string;
@@ -37,8 +38,8 @@ export interface ApprovalTimeoutMonitorDependencies {
   claimDeliveries: (target: AlertDeliveryTarget, items: AlertDeliveryClaim[]) => Promise<ClaimedAlertDelivery[]>;
   renewDeliveries: typeof renewAlertDeliveryBatch;
   finishDeliveries: typeof finishAlertDeliveryBatch;
-  send: (userIds: string[], content: string, title: string) => Promise<void>;
-  sendGroup: (conversationId: string, content: string, mentionUserIds: string[], title: string) => Promise<void>;
+  send: (userIds: string[], content: string, title: string, stopSignal?: AbortSignal) => Promise<void>;
+  sendGroup: (conversationId: string, content: string, mentionUserIds: string[], title: string, stopSignal?: AbortSignal) => Promise<void>;
 }
 
 type TaskRef = Pick<ApprovalTimeoutCandidate, 'processInstanceId' | 'taskId'>;
@@ -187,7 +188,10 @@ const defaultDependencies: ApprovalTimeoutMonitorDependencies = {
 
 export async function monitorApprovalTimeouts(
   dependencies: ApprovalTimeoutMonitorDependencies = defaultDependencies,
+  stopSignal?: AbortSignal,
 ): Promise<{ scanned: number; eligible: number; sent: number; failed: number }> {
+  if (stopSignal?.aborted) return { scanned: 0, eligible: 0, sent: 0, failed: 0 };
+  const stopArgs: [AbortSignal?] = stopSignal ? [stopSignal] : [];
   const config = getConfig();
   const processCodes = parseList(config.APPROVAL_TIMEOUT_PROCESS_CODES);
   const corpId = config.DINGTALK_CORP_ID?.trim();
@@ -212,6 +216,7 @@ export async function monitorApprovalTimeouts(
   const timeoutMs = timeoutMinutes * 60_000;
   const candidates = await dependencies.findCandidates(processCodes, corpId);
   const result = { scanned: candidates.length, eligible: 0, sent: 0, failed: 0 };
+  if (stopSignal?.aborted) return result;
   const deliveryGroups = new Map<string, DeliveryGroup>();
   const redirectedGroups = new Map<string, DeliveryGroup>();
   const queue = (
@@ -346,8 +351,7 @@ export async function monitorApprovalTimeouts(
         queue(queueGroups, group.channel, address, recipientUserId, current);
       }
     }
-    await finish(group.target, obsolete, null, 'APPROVAL_TIMEOUT_TASK_CHANGED');
-    return refreshed;
+    return { refreshed, obsolete };
   };
 
   const deliver = async (group: DeliveryGroup, allowReroute: boolean) => {
@@ -362,9 +366,18 @@ export async function monitorApprovalTimeouts(
       return;
     }
     if (!claims.length) return;
-    const claimedByKey = new Map(claims.map(claim => [deliveryItemKey(claim), claim]));
+    if (stopSignal?.aborted) {
+      await finish(group.target, claims, null, SCHEDULER_STOPPED);
+      return;
+    }
+    const pendingClaims = new Map(claims.map(claim => [deliveryItemKey(claim), claim]));
+    const finishGroup = async (items: ClaimedAlertDelivery[], batchId: string | null, failure?: string) => {
+      // 已发出的分段即使回写失败，也只能由领取超时流程处理。
+      for (const item of items) pendingClaims.delete(deliveryItemKey(item));
+      await finish(group.target, items, batchId, failure);
+    };
     const claimedItems = group.items.flatMap(item => {
-      const claim = claimedByKey.get(deliveryItemKey(item.delivery));
+      const claim = pendingClaims.get(deliveryItemKey(item.delivery));
       return claim ? [{ ...item, claim }] : [];
     });
     let parts: ClaimedTimeoutDelivery[][];
@@ -377,12 +390,15 @@ export async function monitorApprovalTimeouts(
       return;
     }
 
-    for (let index = 0; index < parts.length; index++) {
+    for (let index = 0; index < parts.length && !stopSignal?.aborted; index++) {
       const planned = parts[index];
       let preparingClaims = planned.map(item => item.claim);
       let message: TimeoutMessage | undefined;
       try {
-        const refreshed = await refreshPart(group, planned, allowReroute);
+        const { refreshed, obsolete } = await refreshPart(group, planned, allowReroute);
+        if (stopSignal?.aborted) break;
+        await finishGroup(obsolete, null, 'APPROVAL_TIMEOUT_TASK_CHANGED');
+        if (stopSignal?.aborted) break;
         const [current, ...extra] = buildApprovalTimeoutMessages(refreshed, group.channel === 'group');
         if (!current) continue;
         // 刷新后正文可能变长，新增分段也须在实际发送前复核。
@@ -394,36 +410,46 @@ export async function monitorApprovalTimeouts(
         // 删除失效条目只会缩短本段，同时移除对应群 @。
         [message] = buildApprovalTimeoutMessages(activeItems, group.channel === 'group');
       } catch (error) {
+        if (stopSignal?.aborted) break;
         result.failed++;
         console.error('[ApprovalTimeout] APPROVAL_TIMEOUT_BATCH_PREPARE_FAILED', errorMessage(error));
-        await finish(group.target, preparingClaims, null, errorMessage(error));
+        await finishGroup(preparingClaims, null, errorMessage(error));
         continue;
       }
+      if (stopSignal?.aborted) break;
       if (!message) continue;
       const batchId = randomUUID();
       let failure: string | undefined;
       try {
         if (group.channel === 'group') {
-          await dependencies.sendGroup(group.address, message.content, message.mentionUserIds, message.title);
+          await dependencies.sendGroup(group.address, message.content, message.mentionUserIds, message.title, ...stopArgs);
         } else {
-          await dependencies.send([group.address], message.content, message.title);
+          await dependencies.send([group.address], message.content, message.title, ...stopArgs);
         }
         result.sent++;
       } catch (error) {
+        if (stopSignal?.aborted && error === stopSignal.reason) break;
         result.failed++;
         failure = errorMessage(error);
         console.error(`[ApprovalTimeout] APPROVAL_TIMEOUT_BATCH_SEND_FAILED ${batchId}`, failure);
       }
-      await finish(group.target, message.items.map(item => item.claim), batchId, failure);
+      await finishGroup(message.items.map(item => item.claim), batchId, failure);
+    }
+    if (stopSignal?.aborted) {
+      await finish(group.target, [...pendingClaims.values()], null, SCHEDULER_STOPPED);
     }
   };
 
   for (const [key, group] of deliveryGroups) {
+    if (stopSignal?.aborted) break;
     deliveryGroups.delete(key);
     await deliver(group, true);
   }
   // 已处理目标的转交补充本轮发送。若此时再次变化，留到下一轮扫描。
-  for (const group of redirectedGroups.values()) await deliver(group, false);
+  for (const group of redirectedGroups.values()) {
+    if (stopSignal?.aborted) break;
+    await deliver(group, false);
+  }
 
   console.log(`[ApprovalTimeout] 扫描 ${result.scanned}，已超时 ${result.eligible}，汇总消息发送 ${result.sent}，失败 ${result.failed}`);
   return result;

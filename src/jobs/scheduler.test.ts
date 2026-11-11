@@ -40,7 +40,7 @@ vi.mock('../db/queries/corp-config.js',()=>({getAllCorpIds:async()=>[{corp_id:'f
 vi.mock('./financial-backfill.js', () => ({ runFinancialBackfill: state.financial }));
 import { startScheduler, stopScheduler } from './scheduler.js';
 
-afterEach(() => { stopScheduler(); state.schedules.length = 0; state.refresh.mockReset(); state.timeout.mockReset(); state.reconcile.mockReset(); state.financial.mockReset(); state.financialEnabled=false; state.corpId='corp'; });
+afterEach(async () => { await stopScheduler(); state.schedules.length = 0; state.refresh.mockReset(); state.timeout.mockReset(); state.reconcile.mockReset(); state.financial.mockReset(); state.financialEnabled=false; state.corpId='corp'; });
 
 describe('completed approval refresh scheduling', () => {
   it('has bounded, explicitly enabled configuration', () => {
@@ -75,16 +75,50 @@ describe('completed approval refresh scheduling', () => {
 
 it('does not run another timeout scan while its digests are being sent', async () => {
   let release!: () => void;
-  state.timeout.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+  state.timeout.mockResolvedValue(undefined)
+    .mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
   startScheduler();
   const task = state.schedules.find(row => row.expression === '5,35 * * * *')!;
   const running = task.run();
-  await task.run();
-  expect(state.timeout).toHaveBeenCalledTimes(1);
-  release();
-  await running;
+  try {
+    await task.run();
+    expect(state.timeout).toHaveBeenCalledTimes(1);
+  } finally {
+    release();
+    await running;
+  }
   await task.run();
   expect(state.timeout).toHaveBeenCalledTimes(2);
+});
+
+it('signals the running reminder scan on stop and waits for it before allowing another run', async () => {
+  let release!: () => void;
+  state.timeout.mockResolvedValue(undefined)
+    .mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+  startScheduler();
+  const oldTask = state.schedules.find(row => row.expression === '5,35 * * * *')!;
+  const running = oldTask.run();
+  const oldSignal: AbortSignal = state.timeout.mock.calls[0][1];
+  const stopped = stopScheduler();
+  let finished = false;
+  void stopped.then(() => { finished = true; });
+
+  startScheduler();
+  const newTask = state.schedules.filter(row => row.expression === '5,35 * * * *').at(-1)!;
+  try {
+    expect(oldSignal.aborted).toBe(true);
+    await newTask.run();
+    expect(state.timeout).toHaveBeenCalledTimes(1);
+    expect(finished).toBe(false);
+  } finally {
+    release();
+    await stopped;
+    await running;
+  }
+  await oldTask.run();
+  await newTask.run();
+  expect(state.timeout).toHaveBeenCalledTimes(2);
+  expect(state.timeout.mock.calls[1][1].aborted).toBe(false);
 });
 
 it('passes the invalid-ID cooldown and serializes status reconcile scans', async () => {

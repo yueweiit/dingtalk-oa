@@ -57,6 +57,8 @@ forecastProcess 提交当前 formComponentValues，优先按 workflowForecastNod
 
 [机器人](../../../src/dingtalk/alert-robot.ts) 使用独立应用 Token。个人通过 oToMessages/batchSend 发送 Markdown，并检查 invalidStaffIdList / flowControlledStaffIdList。群要求响应包含 processQueryKey。Token 获取和发送请求均设置 10 秒超时。
 
+停止调度时通知当前超时提醒批次退出。个人和群消息在请求机器人前检查停止信号，等待机器人 Token 时也适用。已经发出的请求按实际返回结果回写，未发送的领取标记为 `APPROVAL_TIMEOUT_SCHEDULER_STOPPED`，可由下一轮按原条件重新领取。优雅关闭会等待批次回写，再关闭数据库连接池。[调度](../../../src/jobs/scheduler.ts) · [超时监控](../../../src/jobs/approval-timeout-monitor.ts)
+
 先外部发送后标 sent，不是 exactly-once；发送已成功而落库失败可能重发。空节点/预算没有独立周期补偿队列，之后能否再尝试依赖事件或调用再次触发；日志成功不能证明旁路通知均已送达。
 
 汇总和语言选择沿用现有投递表结构，部署无需新增迁移。[ding_alert_notification 迁移](../../../migrations/20260915000000_create_ding_alert_notification.cjs)

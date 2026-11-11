@@ -62,6 +62,48 @@ beforeEach(() => {
 });
 
 describe('approval timeout reminders', () => {
+  it.each(['personal', 'group'])('stops a %s reminder if shutdown arrives while renewing its claim', async (channel) => {
+    state.config.APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS = 'cid-group';
+    const stop = new AbortController();
+    const deps = dependencies(72, [candidate({ approverUserId: channel === 'group' ? null : 'approver-1' })]);
+    deps.renewDeliveries.mockImplementationOnce(async (_target, claims) => {
+      stop.abort();
+      return claims;
+    });
+
+    expect(await monitorApprovalTimeouts(deps, stop.signal)).toMatchObject({ sent: 0, failed: 0 });
+    expect(deps.claimDeliveries).toHaveBeenCalledTimes(1);
+    expect(deps.claimDeliveries.mock.calls[0][1][0].payload).toMatchObject({ channel });
+    expect(deps.send).not.toHaveBeenCalled();
+    expect(deps.sendGroup).not.toHaveBeenCalled();
+    expect(deps.finishDeliveries.mock.calls).toEqual([[
+      deps.claimDeliveries.mock.calls[0][0], expect.arrayContaining([expect.objectContaining({ processInstanceId: 'instance-1' })]),
+      null, 'APPROVAL_TIMEOUT_SCHEDULER_STOPPED',
+    ]]);
+  });
+
+  it('records a reminder already being sent and releases unsent segments on shutdown', async () => {
+    state.config.APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS = 'cid-group';
+    const stop = new AbortController();
+    const rows = Array.from({ length: 20 }, (_, index) => candidate({
+      processInstanceId: `instance-${index}`, taskId: `task-${index}`,
+      title: '审批😀'.repeat(100), nodeName: '节点'.repeat(100),
+    }));
+    const deps = dependencies(72, rows);
+    deps.send.mockImplementationOnce(async () => { stop.abort(); });
+
+    expect(await monitorApprovalTimeouts(deps, stop.signal)).toMatchObject({ sent: 1, failed: 0 });
+    expect(deps.send).toHaveBeenCalledTimes(1);
+    expect(deps.sendGroup).not.toHaveBeenCalled();
+    expect(deps.finishDeliveries).toHaveBeenCalledTimes(2);
+    const [sent, released] = deps.finishDeliveries.mock.calls;
+    expect(sent.slice(2)).toEqual([expect.any(String), undefined]);
+    expect(released.slice(2)).toEqual([null, 'APPROVAL_TIMEOUT_SCHEDULER_STOPPED']);
+    expect(released[1].length).toBeGreaterThan(0);
+    expect([...sent[1], ...released[1]].map(item => item.processInstanceId).sort())
+      .toEqual(rows.map(row => row.processInstanceId).sort());
+  });
+
   it('keeps every node of a paused instance out of claims, personal digests and group mentions', async () => {
     state.config.APPROVAL_TIMEOUT_PAUSED_INSTANCES = [['corp-1', 'instance-1'], ['corp-2', 'instance-2']];
     state.config.APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS = 'cid-group';

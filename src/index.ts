@@ -99,7 +99,7 @@ async function main() {
     shutdownTimeout.unref();
 
     try {
-      stopScheduler();
+      const approvalTimeoutStopped = stopScheduler();
       console.log('✅ 定时任务已停止');
 
       stopPackingRefreshWorker();
@@ -122,6 +122,7 @@ async function main() {
       await app.close();
       console.log('✅ Fastify 已关闭');
 
+      await approvalTimeoutStopped;
       await closePool();
       console.log('✅ 数据库连接池已关闭');
 

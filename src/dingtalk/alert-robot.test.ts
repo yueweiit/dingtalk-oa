@@ -20,6 +20,23 @@ function mockFetch(response: Record<string, unknown> = { processQueryKey: 'messa
 }
 
 describe('alert robot', () => {
+  it.each(['personal', 'group'])('prevents a %s POST when shutdown occurs during token acquisition', async (channel) => {
+    const { sendAlertChatMessage, sendAlertGroupMessage } = await import('./alert-robot.js');
+    const stop = new AbortController();
+    let reply!: (response: Response) => void;
+    const fetchMock = vi.fn().mockImplementationOnce(() => new Promise<Response>(resolve => { reply = resolve; }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const send = channel === 'personal'
+      ? sendAlertChatMessage(['user-1'], 'reminder', 'title', stop.signal)
+      : sendAlertGroupMessage('cid-group', 'reminder', ['user-1'], 'title', stop.signal);
+    stop.abort();
+    reply(Response.json({ accessToken: 'token-1', expireIn: 7200 }));
+
+    await expect(send).rejects.toBe(stop.signal.reason);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['https://api.dingtalk.com/v1.0/oauth2/accessToken']);
+  });
+
   it('preserves the personal markdown API used by existing budget and empty-node alerts', async () => {
     const { sendAlertChatMessage } = await import('./alert-robot.js');
     const fetchMock = mockFetch();

@@ -48,10 +48,12 @@ async function getAccessToken(): Promise<string> {
   return accessToken;
 }
 
-export async function sendAlertChatMessage(userIds: string[], content: string, title?: string): Promise<void> {
+export async function sendAlertChatMessage(userIds: string[], content: string, title?: string, stopSignal?: AbortSignal): Promise<void> {
   if (!userIds.length) return;
+  stopSignal?.throwIfAborted();
   const config = requiredRobotConfig();
   const token = await getAccessToken();
+  stopSignal?.throwIfAborted();
   const response = await fetch('https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend', {
     method: 'POST',
     signal: AbortSignal.timeout(10_000),
@@ -81,12 +83,15 @@ export async function sendAlertGroupMessage(
   content: string,
   mentionUserIds: string[] = [],
   title?: string,
+  stopSignal?: AbortSignal,
 ): Promise<void> {
+  stopSignal?.throwIfAborted();
   if (!conversationId.trim()) throw new Error('ALERT_ROBOT_GROUP_ID_REQUIRED');
   const atUserIds = [...new Set(mentionUserIds.map((id) => id.trim()).filter(Boolean))];
   // 应用机器人须同时传 atUserIds 和正文 @userId 标记；不能只拼接姓名。
   const config = requiredRobotConfig();
   const token = await getAccessToken();
+  stopSignal?.throwIfAborted();
   const response = await fetch('https://api.dingtalk.com/v1.0/robot/groupMessages/send', {
     method: 'POST',
     signal: AbortSignal.timeout(10_000),
