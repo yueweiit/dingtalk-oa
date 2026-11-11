@@ -5,6 +5,7 @@ import { classifyUserFetchFailure, computeUserHash, extractUserUnionId } from '.
 import { recordFetchFailure, upsertSnapshot } from '../src/db/queries/user-snapshot.js';
 import { syncDepartmentTree } from '../src/organization/department-tree-sync.js';
 import { getTemplateAdminUserId } from '../src/dingtalk/template-admin-user.js';
+import { backfillApprovalMetadata } from '../src/normalize/approval-metadata-backfill.js';
 
 getConfig();
 const pool = getPool();
@@ -98,7 +99,7 @@ async function syncUsers(corpId: string) {
 
   // 2. 获取所有部门下的用户
   const allUsers = new Map<string, any>();
-  for (const dept of allDepts) {
+  for (const dept of [{ dept_id: 1, name: 'ROOT' }, ...allDepts]) {
     let cursor = 0;
     let hasMore = true;
     while (hasMore) {
@@ -127,8 +128,7 @@ async function syncUsers(corpId: string) {
   console.log(`  共找到 ${allUsers.size} 个用户`);
 
   if (allUsers.size === 0) {
-    console.log('没有需要同步的用户');
-    return;
+    console.log('[MetadataSync] USER_LIST_EMPTY_USING_STORED_PROFILES');
   }
 
   // 3. 同步用户快照
@@ -161,18 +161,6 @@ async function syncUsers(corpId: string) {
         continue;
       }
 
-      // 回填实例表和任务表的姓名
-      await pool.query(
-        `UPDATE ding_approval_instance SET originator_user_name = COALESCE(originator_user_name, $1), updated_at = now()
-         WHERE corp_id = $2 AND originator_user_id = $3 AND (originator_user_name IS NULL OR originator_user_name = '')`,
-        [user.name, corpId, userId]
-      );
-      await pool.query(
-        `UPDATE ding_approval_task SET approver_user_name = COALESCE(approver_user_name, $1), updated_at = now()
-         WHERE corp_id = $2 AND approver_user_id = $3 AND (approver_user_name IS NULL OR approver_user_name = '')`,
-        [user.name, corpId, userId]
-      );
-
       success++;
     } catch (e: any) {
       failed++;
@@ -180,6 +168,9 @@ async function syncUsers(corpId: string) {
   }
 
   console.log(`用户同步完成: 成功 ${success}, 跳过 ${skipped}, 补齐 unionId ${unionIdsUpdated}, 失败 ${failed}`);
+  // 即使资料 hash 未变化，也必须执行；按实例分批，不在每个用户后重复全表 UPDATE。
+  const repaired = await backfillApprovalMetadata(corpId, { dryRun: false });
+  console.log('[MetadataSync] APPROVAL_METADATA_BACKFILL', JSON.stringify(repaired));
 }
 
 // ========== 主流程 ==========

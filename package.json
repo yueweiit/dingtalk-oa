@@ -18,6 +18,7 @@
     "sync:templates": "tsx scripts/sync-metadata.ts --templates",
     "sync:users": "tsx scripts/sync-metadata.ts --users",
     "backfill": "tsx scripts/backfill.ts",
+    "backfill:metadata": "tsx src/cli/backfill-approval-metadata.ts",
     "archive:attachments": "tsx src/cli/archive-attachments.ts",
     "archive:recovery-canaries": "tsx src/cli/prepare-archive-recovery.ts canaries",
     "archive:recovery-remainders": "tsx src/cli/prepare-archive-recovery.ts successful-remainders",
