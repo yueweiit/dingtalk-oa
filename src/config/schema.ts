@@ -85,6 +85,7 @@ export const configSchema = z.object({
   APPROVAL_STATUS_RECONCILE_CRON: z.string().default('*/15 * * * *'),
   APPROVAL_STATUS_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(100),
   APPROVAL_STATUS_RECONCILE_DELAY_MS: z.coerce.number().int().min(0).max(10_000).default(500),
+  APPROVAL_STATUS_RECONCILE_INVALID_ID_COOLDOWN_MINUTES: z.coerce.number().int().min(1).max(365 * 24 * 60).default(24 * 60),
   APPROVAL_REPAIR_POLL_MS: z.coerce.number().int().min(1000).max(60_000).default(5000),
 
   // Durable financial history is explicitly seeded, then drained in bounded scheduled batches.

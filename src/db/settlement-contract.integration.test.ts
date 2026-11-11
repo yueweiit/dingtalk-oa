@@ -354,6 +354,18 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
     expect((await approvalQueries.findRunningApprovalInstances(1))[0].process_instance_id).toBe('running-b');
   });
 
+  it('excludes cooldown keys before LIMIT and keeps the same instance ID eligible in another enterprise', async () => {
+    const instance = { process_instance_id: 'shared-id', process_code: 'LOG', status: 'RUNNING' };
+    await upsertInstance({ ...instance, corp_id: 'corp-1', last_event_time: new Date('2026-10-01T00:00:00Z') });
+    await upsertInstance({ ...instance, corp_id: 'corp-2', last_event_time: new Date('2026-10-02T00:00:00Z') });
+
+    const coolingDown = [{ corpId: 'corp-1', processInstanceId: 'shared-id' }];
+    expect(await approvalQueries.findRunningApprovalInstances(1, coolingDown))
+      .toEqual([expect.objectContaining({ corp_id: 'corp-2', process_instance_id: 'shared-id', status: 'RUNNING' })]);
+    expect(await approvalQueries.findRunningApprovalInstances(1))
+      .toEqual([expect.objectContaining({ corp_id: 'corp-1', process_instance_id: 'shared-id', status: 'RUNNING' })]);
+  });
+
 
   it('grants only SELECT on the public contract and retains compatible v1 columns', async () => {
     const { rows } = await client.query(`SELECT

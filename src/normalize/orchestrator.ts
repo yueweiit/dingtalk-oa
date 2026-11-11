@@ -84,7 +84,7 @@ export async function refreshApprovalInstance(
     const errorDetail = apiError.name === 'ZodError'
       ? JSON.stringify(apiError.errors, null, 2)
       : apiError.message;
-    throw new Error(`getInstance 失败: ${errorDetail}`);
+    throw new Error(`getInstance 失败: ${errorDetail}`, { cause: apiError });
   }
 
   await persistApprovalInstance(params, instanceDetail);

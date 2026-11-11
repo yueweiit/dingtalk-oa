@@ -68,14 +68,20 @@ export function startScheduler(): void {
   });
 
   // 定期核对审批中实例，兜底 Kafka 或 Stream 漏掉的状态变更事件。
+  let statusReconcileRunning = false;
   const statusReconcileTask = cron.schedule(config.APPROVAL_STATUS_RECONCILE_CRON, async () => {
+    if (statusReconcileRunning) return;
+    statusReconcileRunning = true;
     try {
       await reconcileRunningApprovalStatuses({
         limit: config.APPROVAL_STATUS_RECONCILE_BATCH_SIZE,
         delayMs: config.APPROVAL_STATUS_RECONCILE_DELAY_MS,
+        invalidIdCooldownMinutes: config.APPROVAL_STATUS_RECONCILE_INVALID_ID_COOLDOWN_MINUTES,
       });
     } catch (error) {
       console.error('[Scheduler] 审批状态核对任务失败:', error);
+    } finally {
+      statusReconcileRunning = false;
     }
   }, {
     timezone: 'Asia/Shanghai',

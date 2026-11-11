@@ -16,6 +16,7 @@ import {
 import type { DownloadResource } from '../archive/download-strategies.js';
 
 const BASE_URL = 'https://api.dingtalk.com/v1.0';
+const PROCESS_INSTANCE_ENDPOINT = '/workflow/processInstances';
 
 // Simple token-bucket rate limiter
 class RateLimiter {
@@ -71,6 +72,21 @@ class DingTalkApiError extends Error {
   }
 }
 
+export class InvalidApprovalInstanceIdError extends DingTalkApiError {
+  constructor(message: string) {
+    super(message, false);
+    this.name = 'InvalidApprovalInstanceIdError';
+  }
+}
+
+function invalidInstanceResponse(responseText: string): boolean {
+  try {
+    return JSON.parse(responseText)?.code === 'processInstanceIdError';
+  } catch {
+    return false;
+  }
+}
+
 async function apiCall<T>(endpoint: string, options: ApiCallOptions = {}): Promise<T> {
   const { method = 'GET', body, retries = 1, usageName = endpoint.split('?', 1)[0], validate } = options;
 
@@ -89,8 +105,12 @@ async function apiCall<T>(endpoint: string, options: ApiCallOptions = {}): Promi
       const responseText = await response.text().catch(() => '');
       if (!response.ok) {
         if (response.status === 401) tokenManager.clearToken();
+        const message = `API 调用失败: ${usageName} HTTP ${response.status} ${responseText}`;
+        if (usageName === PROCESS_INSTANCE_ENDPOINT && response.status === 400 && invalidInstanceResponse(responseText)) {
+          throw new InvalidApprovalInstanceIdError(message);
+        }
         throw new DingTalkApiError(
-          `API 调用失败: ${usageName} HTTP ${response.status} ${responseText}`,
+          message,
           response.status === 401 || response.status === 429 || response.status >= 500,
         );
       }
@@ -273,7 +293,7 @@ export async function getInstance(
   processInstanceId: string,
   options: { retries?: number } = {},
 ): Promise<ApprovalInstanceDetail> {
-  const data = await apiCall<unknown>(`/workflow/processInstances?processInstanceId=${processInstanceId}`, {
+  const data = await apiCall<unknown>(`${PROCESS_INSTANCE_ENDPOINT}?processInstanceId=${encodeURIComponent(processInstanceId)}`, {
     retries: options.retries,
   });
 

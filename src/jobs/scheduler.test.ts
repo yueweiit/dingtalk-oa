@@ -10,6 +10,7 @@ const state = vi.hoisted(() => ({
   schedules: [] as Array<{ expression: string; run: () => Promise<void> }>,
   refresh: vi.fn(),
   timeout: vi.fn(),
+  reconcile: vi.fn(),
 }));
 vi.mock('node-cron', () => ({ default: { schedule: (expression: string, run: () => Promise<void>) => {
   state.schedules.push({ expression, run });
@@ -28,15 +29,18 @@ vi.mock('../config/index.js', () => ({ getConfig: () => ({
   COMPLETED_APPROVAL_REFRESH_MIN_INTERVAL_SECONDS: 21600,
   APPROVAL_STATUS_RECONCILE_CRON: '*/15 * * * *',
   APPROVAL_STATUS_RECONCILE_BATCH_SIZE: 100,
+  APPROVAL_STATUS_RECONCILE_DELAY_MS: 500,
+  APPROVAL_STATUS_RECONCILE_INVALID_ID_COOLDOWN_MINUTES: 90,
   APPROVAL_TIMEOUT_MONITOR_CRON: '5,35 * * * *',
 }) }));
 vi.mock('./completed-approval-refresh.js', () => ({ refreshCompletedLogisticsApprovals: state.refresh }));
 vi.mock('./approval-timeout-monitor.js', () => ({ monitorApprovalTimeouts: state.timeout }));
+vi.mock('./approval-status-reconcile.js', () => ({ reconcileRunningApprovalStatuses: state.reconcile }));
 vi.mock('../db/queries/corp-config.js',()=>({getAllCorpIds:async()=>[{corp_id:'first'},{corp_id:'second'}]}));
 vi.mock('./financial-backfill.js', () => ({ runFinancialBackfill: state.financial }));
 import { startScheduler, stopScheduler } from './scheduler.js';
 
-afterEach(() => { stopScheduler(); state.schedules.length = 0; state.refresh.mockReset(); state.timeout.mockReset(); state.financial.mockReset(); state.financialEnabled=false; state.corpId='corp'; });
+afterEach(() => { stopScheduler(); state.schedules.length = 0; state.refresh.mockReset(); state.timeout.mockReset(); state.reconcile.mockReset(); state.financial.mockReset(); state.financialEnabled=false; state.corpId='corp'; });
 
 describe('completed approval refresh scheduling', () => {
   it('has bounded, explicitly enabled configuration', () => {
@@ -81,6 +85,20 @@ it('does not run another timeout scan while its digests are being sent', async (
   await running;
   await task.run();
   expect(state.timeout).toHaveBeenCalledTimes(2);
+});
+
+it('passes the invalid-ID cooldown and serializes status reconcile scans', async () => {
+  let release!: () => void;
+  state.reconcile.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+  startScheduler();
+  const task = state.schedules.find(row => row.expression === '*/15 * * * *')!;
+  const running = task.run();
+  await task.run();
+  expect(state.reconcile.mock.calls).toEqual([[{ limit: 100, delayMs: 500, invalidIdCooldownMinutes: 90 }]]);
+  release();
+  await running;
+  await task.run();
+  expect(state.reconcile).toHaveBeenCalledTimes(2);
 });
 
 it('drains durable financial history in bounded nonoverlapping scheduled invocations', async () => {

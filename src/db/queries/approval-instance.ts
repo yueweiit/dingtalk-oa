@@ -125,14 +125,21 @@ export async function findByProcessCode(
  * 返回最久未同步的审批中实例，供定时状态核对兜底使用。
  * 成功刷新后 last_event_time 会推进；源 updated_at 仅在内容变化时推进。
  */
-export async function findRunningApprovalInstances(limit: number): Promise<DingApprovalInstance[]> {
+export async function findRunningApprovalInstances(
+  limit: number,
+  coolingDown: readonly { corpId: string; processInstanceId: string }[] = [],
+): Promise<DingApprovalInstance[]> {
   return withClient(async (client) => {
     const { rows } = await client.query<DingApprovalInstance>(
-      `SELECT * FROM ding_approval_instance
-       WHERE deleted_at IS NULL AND UPPER(COALESCE(status, '')) = 'RUNNING'
-       ORDER BY COALESCE(last_event_time, updated_at) ASC, corp_id, process_instance_id
+      `SELECT i.* FROM ding_approval_instance i
+       WHERE i.deleted_at IS NULL AND UPPER(COALESCE(i.status, '')) = 'RUNNING'
+         AND NOT EXISTS (
+           SELECT 1 FROM jsonb_to_recordset($2::jsonb) AS cooldown("corpId" varchar, "processInstanceId" varchar)
+           WHERE cooldown."corpId" = i.corp_id AND cooldown."processInstanceId" = i.process_instance_id
+         )
+       ORDER BY COALESCE(i.last_event_time, i.updated_at) ASC, i.corp_id, i.process_instance_id
        LIMIT $1`,
-      [limit]
+      [limit, JSON.stringify(coolingDown)]
     );
     return rows;
   });

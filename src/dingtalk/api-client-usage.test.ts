@@ -6,6 +6,8 @@ vi.mock('../db/queries/attachment-archive.js', () => ({ recordApiUsage }));
 
 import {
   getApprovalAttachmentDownloadUrl,
+  getInstance,
+  InvalidApprovalInstanceIdError,
   getLegacyApprovalAttachmentSpaceId,
   authorizeLegacyApprovalAttachment,
   authorizeApprovalAttachmentDownload,
@@ -79,6 +81,28 @@ describe('DingTalk API usage accounting', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(recordApiUsage).toHaveBeenCalledWith('/workflow/processInstances/spaces/files/urls/download', false);
   });
+
+  it('identifies the exact invalid-instance error and records the failed request once', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      code: 'processInstanceIdError', message: 'processInstanceId参数无效',
+    }), { status: 400 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(getInstance('instance')).rejects.toBeInstanceOf(InvalidApprovalInstanceIdError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(recordApiUsage).toHaveBeenCalledWith('/workflow/processInstances', false);
+  });
+
+  it.each([[400, 'accessDenied'], [403, 'processInstanceIdError'], [429, 'processInstanceIdError']])(
+    'does not classify HTTP %s with code %s as an invalid instance ID', async (status, code) => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        code, message: 'processInstanceIdError',
+      }), { status })));
+      const error = await getInstance('instance', { retries: 0 }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(InvalidApprovalInstanceIdError);
+    },
+  );
 
   it('uses documented cspace, authorization and thumbnail request bodies', async () => {
     const fetchMock = vi.fn()
