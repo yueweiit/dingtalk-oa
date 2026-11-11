@@ -1,15 +1,17 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { getConfig } from '../config/index.js';
 import { withClient } from '../db/pool.js';
 import {
-  claimAlertDelivery,
-  markAlertDeliveryFailed,
-  markAlertDeliverySent,
-  type AlertDeliveryKey,
+  claimAlertDeliveryBatch,
+  finishAlertDeliveryBatch,
+  renewAlertDeliveryBatch,
+  type AlertDeliveryClaim,
+  type AlertDeliveryTarget,
+  type ClaimedAlertDelivery,
 } from '../db/queries/alert-notification.js';
 import { sendAlertChatMessage, sendAlertGroupMessage } from '../dingtalk/alert-robot.js';
 import { parseDingTalkTime } from '../normalize/instance-normalizer.js';
-import { buildApprovalTimeoutMessage } from './approval-timeout-message.js';
+import { buildApprovalTimeoutMessages, type ApprovalTimeoutMessageItem } from './approval-timeout-message.js';
 
 const ALERT_TYPE = 'approval_timeout';
 const REPEAT_MINUTES = 24 * 60;
@@ -30,13 +32,35 @@ export interface ApprovalTimeoutCandidate {
 
 export interface ApprovalTimeoutMonitorDependencies {
   now: () => Date;
-  findCandidates: (processCodes: string[], corpId: string) => Promise<ApprovalTimeoutCandidate[]>;
-  claimDelivery: (key: AlertDeliveryKey, payload: Record<string, unknown>) => Promise<boolean>;
-  markSent: (key: AlertDeliveryKey) => Promise<void>;
-  markFailed: (key: AlertDeliveryKey, error: string) => Promise<void>;
-  send: (userIds: string[], content: string) => Promise<void>;
-  sendGroup: (conversationId: string, content: string, mentionUserIds: string[]) => Promise<void>;
+  findCandidates: typeof findRunningApprovalTimeoutCandidates;
+  claimDeliveries: (target: AlertDeliveryTarget, items: AlertDeliveryClaim[]) => Promise<ClaimedAlertDelivery[]>;
+  renewDeliveries: typeof renewAlertDeliveryBatch;
+  finishDeliveries: typeof finishAlertDeliveryBatch;
+  send: (userIds: string[], content: string, title: string) => Promise<void>;
+  sendGroup: (conversationId: string, content: string, mentionUserIds: string[], title: string) => Promise<void>;
 }
+
+type TaskRef = Pick<ApprovalTimeoutCandidate, 'processInstanceId' | 'taskId'>;
+type PendingDelivery = ApprovalTimeoutMessageItem & { ref: TaskRef; delivery: AlertDeliveryClaim };
+type ClaimedTimeoutDelivery = PendingDelivery & { claim: ClaimedAlertDelivery };
+type TimeoutMessage = ReturnType<typeof buildApprovalTimeoutMessages<ClaimedTimeoutDelivery>>[number];
+
+interface DeliveryGroup {
+  target: AlertDeliveryTarget;
+  channel: 'personal' | 'group';
+  address: string;
+  items: PendingDelivery[];
+}
+
+function deliveryItemKey(item: Pick<AlertDeliveryClaim, 'processInstanceId' | 'alertPhase'>): string {
+  return JSON.stringify([item.processInstanceId, item.alertPhase]);
+}
+
+function taskRefKey(task: TaskRef): string {
+  return JSON.stringify([task.processInstanceId, task.taskId]);
+}
+
+const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -77,8 +101,10 @@ function currentTaskSnapshot(candidate: ApprovalTimeoutCandidate): {
   return { task, authoritative: Object.keys(task).length > 0 };
 }
 
-export async function findRunningApprovalTimeoutCandidates(processCodes: string[], corpId: string): Promise<ApprovalTimeoutCandidate[]> {
-  if (!processCodes.length) return [];
+export async function findRunningApprovalTimeoutCandidates(
+  processCodes: string[], corpId: string, refs?: TaskRef[],
+): Promise<ApprovalTimeoutCandidate[]> {
+  if (!processCodes.length || refs?.length === 0) return [];
   return withClient(async (client) => {
     const { rows } = await client.query<{
       corp_id: string;
@@ -106,8 +132,11 @@ export async function findRunningApprovalTimeoutCandidates(processCodes: string[
          AND t.end_time IS NULL
          AND i.process_code = ANY($1::varchar[])
          AND i.corp_id = $2
+         ${refs ? `AND EXISTS (SELECT 1
+           FROM jsonb_to_recordset($3::jsonb) AS ref("processInstanceId" text, "taskId" text)
+           WHERE ref."processInstanceId" = i.process_instance_id AND ref."taskId" = t.task_id)` : ''}
        ORDER BY i.create_time ASC, t.task_order ASC`,
-      [processCodes, corpId]
+      refs ? [processCodes, corpId, JSON.stringify(refs)] : [processCodes, corpId]
     );
     return rows.map((row) => ({
       corpId: row.corp_id,
@@ -128,9 +157,9 @@ export async function findRunningApprovalTimeoutCandidates(processCodes: string[
 const defaultDependencies: ApprovalTimeoutMonitorDependencies = {
   now: () => new Date(),
   findCandidates: findRunningApprovalTimeoutCandidates,
-  claimDelivery: (key, payload) => claimAlertDelivery(key, payload, REPEAT_MINUTES),
-  markSent: markAlertDeliverySent,
-  markFailed: markAlertDeliveryFailed,
+  claimDeliveries: (target, items) => claimAlertDeliveryBatch(target, items, REPEAT_MINUTES),
+  renewDeliveries: renewAlertDeliveryBatch,
+  finishDeliveries: finishAlertDeliveryBatch,
   send: sendAlertChatMessage,
   sendGroup: sendAlertGroupMessage,
 };
@@ -146,94 +175,203 @@ export async function monitorApprovalTimeouts(
     return { scanned: 0, eligible: 0, sent: 0, failed: 0 };
   }
 
-  const groups = parseList(config.APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS);
+  const groups = parseList(config.APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS).map(address => ({
+    address,
+    recipientUserId: `group:${createHash('sha256').update(address).digest('hex')}`,
+  }));
+  const processScope = new Set(processCodes);
   const now = dependencies.now();
   const timeoutMinutes = config.APPROVAL_TIMEOUT_MINUTES;
   const timeoutMs = timeoutMinutes * 60_000;
   const candidates = await dependencies.findCandidates(processCodes, corpId);
   const result = { scanned: candidates.length, eligible: 0, sent: 0, failed: 0 };
+  const deliveryGroups = new Map<string, DeliveryGroup>();
+  const redirectedGroups = new Map<string, DeliveryGroup>();
+  const queue = (
+    queueGroups: Map<string, DeliveryGroup>, channel: DeliveryGroup['channel'],
+    address: string, recipientUserId: string, item: PendingDelivery,
+  ) => {
+    const groupKey = `${channel}:${address}`;
+    let group = queueGroups.get(groupKey);
+    if (!group) {
+      group = { target: { corpId, alertType: ALERT_TYPE, recipientUserId }, channel, address, items: [] };
+      queueGroups.set(groupKey, group);
+    }
+    group.items.push(item);
+  };
 
-  for (const candidate of candidates) {
-    if (candidate.corpId !== corpId) continue;
+  const resolve = (candidate: ApprovalTimeoutCandidate): PendingDelivery | null => {
+    if (candidate.corpId !== corpId || !processScope.has(candidate.processCode)) return null;
     const snapshot = currentTaskSnapshot(candidate);
-    if (!snapshot) continue;
+    if (!snapshot) return null;
     const startedAt = currentNodeStart(candidate);
     if (!startedAt || !Number.isFinite(startedAt.getTime())) {
       console.warn('[ApprovalTimeout] APPROVAL_TIMEOUT_TASK_START_MISSING');
-      continue;
+      return null;
     }
     const waitedMs = now.getTime() - startedAt.getTime();
-    if (waitedMs < timeoutMs) continue;
-    result.eligible++;
+    if (waitedMs < timeoutMs) return null;
 
-    const approvalUrl = `https://applink.dingtalk.com/approval/detail?corpId=${encodeURIComponent(candidate.corpId)}&instanceId=${encodeURIComponent(candidate.processInstanceId)}`;
+    const approvalUrl = new URL('https://applink.dingtalk.com/approval/detail');
+    approvalUrl.searchParams.set('corpId', candidate.corpId);
+    approvalUrl.searchParams.set('instanceId', candidate.processInstanceId);
     const approverUserId = snapshot.authoritative
       ? stringValue(snapshot.task.userId)
       : stringValue(candidate.approverUserId);
-    const approverUserName = snapshot.authoritative
-      ? (approverUserId ? stringValue(snapshot.task.userName) : null)
-      : stringValue(candidate.approverUserName);
-    const content = buildApprovalTimeoutMessage({
-      title: candidate.title || candidate.processCode,
-      nodeName: candidate.nodeName,
-      approver: approverUserName || approverUserId,
-      waitedMs, timeoutMs, approvalUrl,
-    });
+    const approverUserName = approverUserId
+      ? stringValue(snapshot.authoritative ? snapshot.task.userName : candidate.approverUserName)
+      : null;
     // 固定长度标识兼容 alert_phase VARCHAR(64)，重进同一任务时按实际开始时间区分。
     const taskKey = createHash('sha256').update(JSON.stringify([
       candidate.taskId, startedAt.toISOString(),
     ])).digest('hex').slice(0, 48);
-    const targets: Array<{ recipientId: string; channel: string; send: () => Promise<void> }> = [];
-    if (approverUserId) {
-      targets.push({ recipientId: approverUserId, channel: 'personal', send: () => dependencies.send([approverUserId], content) });
-    } else {
-      console.warn('[ApprovalTimeout] APPROVAL_TIMEOUT_APPROVER_MISSING');
-    }
-    for (const group of groups) {
-      targets.push({
-        recipientId: `group:${createHash('sha256').update(group).digest('hex')}`,
-        channel: 'group',
-        send: () => dependencies.sendGroup(group, content, approverUserId ? [approverUserId] : []),
-      });
-    }
-
-    for (const target of targets) {
-      const key: AlertDeliveryKey = {
-        corpId: candidate.corpId,
+    return {
+      ref: { processInstanceId: candidate.processInstanceId, taskId: candidate.taskId },
+      title: candidate.title || candidate.processCode,
+      nodeName: candidate.nodeName,
+      approver: approverUserName,
+      approverUserId,
+      waitedMs,
+      approvalUrl: approvalUrl.href,
+      delivery: {
         processInstanceId: candidate.processInstanceId,
-        alertType: ALERT_TYPE,
         alertPhase: `daily:${taskKey}`,
-        recipientUserId: target.recipientId,
-      };
-      let claimed = false;
-      try {
-        claimed = await dependencies.claimDelivery(key, {
+        payload: {
           processCode: candidate.processCode,
           taskId: candidate.taskId,
           waitedMs,
           startedAt: startedAt.toISOString(),
-          channel: target.channel,
           repeatAfterMinutes: REPEAT_MINUTES,
-        });
-        if (!claimed) continue;
-        await target.send();
-        await dependencies.markSent(key);
+        },
+      },
+    };
+  };
+
+  for (const candidate of candidates) {
+    const item = resolve(candidate);
+    if (!item) continue;
+    result.eligible++;
+    if (item.approverUserId) {
+      queue(deliveryGroups, 'personal', item.approverUserId, item.approverUserId, item);
+    } else {
+      console.warn('[ApprovalTimeout] APPROVAL_TIMEOUT_APPROVER_MISSING');
+    }
+    for (const group of groups) queue(deliveryGroups, 'group', group.address, group.recipientUserId, item);
+  }
+
+  const finish = async (target: AlertDeliveryTarget, claims: ClaimedAlertDelivery[], batchId: string | null, failure?: string) => {
+    if (!claims.length) return;
+    try {
+      await dependencies.finishDeliveries(target, claims, batchId, failure);
+    } catch (error) {
+      result.failed++;
+      console.error(`[ApprovalTimeout] APPROVAL_TIMEOUT_BATCH_RESULT_FAILED ${batchId ?? 'unsent'}`, errorMessage(error));
+    }
+  };
+
+  const refreshPart = async (group: DeliveryGroup, items: ClaimedTimeoutDelivery[], allowReroute: boolean) => {
+    const rows = await dependencies.findCandidates(processCodes, corpId, items.map(item => item.ref));
+    const currentByTask = new Map<string, PendingDelivery>();
+    for (const row of rows) {
+      const item = resolve(row);
+      if (item) currentByTask.set(taskRefKey(item.ref), item);
+    }
+    const refreshed: ClaimedTimeoutDelivery[] = [];
+    const obsolete: ClaimedAlertDelivery[] = [];
+    for (const item of items) {
+      const current = currentByTask.get(taskRefKey(item.ref));
+      const address = group.channel === 'group' ? group.address : current?.approverUserId;
+      if (current && address === group.address && current.delivery.alertPhase === item.claim.alertPhase) {
+        refreshed.push({ ...current, claim: item.claim });
+        continue;
+      }
+      obsolete.push(item.claim);
+      if (allowReroute && current && address) {
+        const key = `${group.channel}:${address}`;
+        const queueGroups = deliveryGroups.has(key) ? deliveryGroups : redirectedGroups;
+        const recipientUserId = group.channel === 'group' ? group.target.recipientUserId : address;
+        queue(queueGroups, group.channel, address, recipientUserId, current);
+      }
+    }
+    await finish(group.target, obsolete, null, 'APPROVAL_TIMEOUT_TASK_CHANGED');
+    return refreshed;
+  };
+
+  const deliver = async (group: DeliveryGroup, allowReroute: boolean) => {
+    let claims: ClaimedAlertDelivery[];
+    try {
+      claims = await dependencies.claimDeliveries(group.target, group.items.map(({ delivery }) => ({
+        ...delivery, payload: { ...delivery.payload, channel: group.channel },
+      })));
+    } catch (error) {
+      result.failed++;
+      console.error('[ApprovalTimeout] APPROVAL_TIMEOUT_BATCH_CLAIM_FAILED', errorMessage(error));
+      return;
+    }
+    if (!claims.length) return;
+    const claimedByKey = new Map(claims.map(claim => [deliveryItemKey(claim), claim]));
+    const claimedItems = group.items.flatMap(item => {
+      const claim = claimedByKey.get(deliveryItemKey(item.delivery));
+      return claim ? [{ ...item, claim }] : [];
+    });
+    let parts: ClaimedTimeoutDelivery[][];
+    try {
+      parts = buildApprovalTimeoutMessages(claimedItems, group.channel === 'group').map(message => message.items);
+    } catch (error) {
+      result.failed++;
+      console.error('[ApprovalTimeout] APPROVAL_TIMEOUT_BATCH_FORMAT_FAILED', errorMessage(error));
+      await finish(group.target, claims, null, errorMessage(error));
+      return;
+    }
+
+    for (let index = 0; index < parts.length; index++) {
+      const planned = parts[index];
+      let preparingClaims = planned.map(item => item.claim);
+      let message: TimeoutMessage | undefined;
+      try {
+        const refreshed = await refreshPart(group, planned, allowReroute);
+        const [current, ...extra] = buildApprovalTimeoutMessages(refreshed, group.channel === 'group');
+        if (!current) continue;
+        // 刷新后正文可能变长，新增分段也须在实际发送前复核。
+        parts.splice(index + 1, 0, ...extra.map(part => part.items));
+        preparingClaims = current.items.map(item => item.claim);
+        const active = await dependencies.renewDeliveries(group.target, preparingClaims);
+        const activeKeys = new Set(active.map(deliveryItemKey));
+        const activeItems = current.items.filter(item => activeKeys.has(deliveryItemKey(item.claim)));
+        // 删除失效条目只会缩短本段，同时移除对应群 @。
+        [message] = buildApprovalTimeoutMessages(activeItems, group.channel === 'group');
+      } catch (error) {
+        result.failed++;
+        console.error('[ApprovalTimeout] APPROVAL_TIMEOUT_BATCH_PREPARE_FAILED', errorMessage(error));
+        await finish(group.target, preparingClaims, null, errorMessage(error));
+        continue;
+      }
+      if (!message) continue;
+      const batchId = randomUUID();
+      let failure: string | undefined;
+      try {
+        if (group.channel === 'group') {
+          await dependencies.sendGroup(group.address, message.content, message.mentionUserIds, message.title);
+        } else {
+          await dependencies.send([group.address], message.content, message.title);
+        }
         result.sent++;
       } catch (error) {
         result.failed++;
-        const message = error instanceof Error ? error.message : String(error);
-        if (claimed) {
-          try {
-            await dependencies.markFailed(key, message);
-          } catch {
-            console.error('[ApprovalTimeout] APPROVAL_TIMEOUT_FAILURE_RECORD_FAILED');
-          }
-        }
-        console.error(`[ApprovalTimeout] 发送失败: ${candidate.processInstanceId}`, message);
+        failure = errorMessage(error);
+        console.error(`[ApprovalTimeout] APPROVAL_TIMEOUT_BATCH_SEND_FAILED ${batchId}`, failure);
       }
+      await finish(group.target, message.items.map(item => item.claim), batchId, failure);
     }
-  }
+  };
 
-  console.log(`[ApprovalTimeout] 扫描 ${result.scanned}，已超时 ${result.eligible}，发送 ${result.sent}，失败 ${result.failed}`);
+  for (const [key, group] of deliveryGroups) {
+    deliveryGroups.delete(key);
+    await deliver(group, true);
+  }
+  // 已处理目标的转交补充本轮发送。若此时再次变化，留到下一轮扫描。
+  for (const group of redirectedGroups.values()) await deliver(group, false);
+
+  console.log(`[ApprovalTimeout] 扫描 ${result.scanned}，已超时 ${result.eligible}，汇总消息发送 ${result.sent}，失败 ${result.failed}`);
   return result;
 }

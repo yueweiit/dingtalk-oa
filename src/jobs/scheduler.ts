@@ -81,11 +81,16 @@ export function startScheduler(): void {
     timezone: 'Asia/Shanghai',
   });
 
+  let approvalTimeoutRunning = false;
   const approvalTimeoutTask = cron.schedule(config.APPROVAL_TIMEOUT_MONITOR_CRON, async () => {
+    if (approvalTimeoutRunning) return;
+    approvalTimeoutRunning = true;
     try {
       await monitorApprovalTimeouts();
     } catch (error) {
       console.error('[Scheduler] 审批超时检查失败:', error);
+    } finally {
+      approvalTimeoutRunning = false;
     }
   }, {
     timezone: 'Asia/Shanghai',

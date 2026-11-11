@@ -1,43 +1,82 @@
-// 仅正式支持简体中文；新增通知语言时在此扩展，不改业务状态或源名称。
-const templates = {
-  'zh-CN': {
-    title: '【审批已超时】',
-    process: '流程',
-    node: '节点',
-    approver: '待审批人',
-    unknownNode: '未命名审批节点',
-    unknownApprover: '未识别审批人',
-    waited: '已等待',
-    limit: '首次提醒时限',
-    link: '审批单',
-    repeat: '此后每满 24 小时提醒一次，当前任务处理结束后停止提醒。',
-    duration: (hours: string, minutes: string) => `${hours}小时${minutes}分钟`,
-  },
-};
+import { alertMarkdownParams } from '../dingtalk/alert-markdown.js';
 
-export function buildApprovalTimeoutMessage(params: {
+// 按钉钉群消息 msgParam 的 15000 字节上限切分，个人也沿用相同长度预算。
+const MAX_MARKDOWN_PARAM_BYTES = 15_000;
+
+const text = {
+  title: '审批超时汇总',
+  count: (value: string) => `${value} 个待审批节点`,
+  labelSeparator: '：',
+  node: '节点',
+  approver: '待审批人',
+  unknownNode: '未命名审批节点',
+  unknownApprover: '未识别审批人',
+  waited: '已等待',
+  link: '查看审批',
+  duration: (hours: string, minutes: string) => `${hours}小时${minutes}分钟`,
+};
+const number = new Intl.NumberFormat('zh-CN', { useGrouping: false });
+
+export interface ApprovalTimeoutMessageItem {
   title: string;
   nodeName: string | null;
   approver: string | null;
+  approverUserId: string | null;
   waitedMs: number;
-  timeoutMs: number;
   approvalUrl: string;
-  locale?: keyof typeof templates;
-}): string {
-  const locale = params.locale ?? 'zh-CN';
-  const text = templates[locale];
-  const number = new Intl.NumberFormat(locale, { useGrouping: false });
-  const duration = (ms: number) => {
-    const minutes = Math.max(0, Math.floor(ms / 60_000));
-    return text.duration(number.format(Math.floor(minutes / 60)), number.format(minutes % 60));
+}
+
+interface ApprovalTimeoutMessage<T> {
+  items: T[];
+  title: string;
+  content: string;
+  mentionUserIds: string[];
+}
+
+function label(value: string): string {
+  const characters = Array.from(value.replace(/\s+/gu, ' ').trim());
+  const short = characters.length > 120 ? `${characters.slice(0, 120).join('')}…` : characters.join('');
+  return short.replace(/[\\`*_\[\]<>]/g, '\\$&');
+}
+
+export function buildApprovalTimeoutMessages<T extends ApprovalTimeoutMessageItem>(
+  items: T[],
+  mentionApprovers: boolean,
+): ApprovalTimeoutMessage<T>[] {
+  const line = (item: T) => {
+    const minutes = Math.max(0, Math.floor(item.waitedMs / 60_000));
+    const waited = text.duration(number.format(Math.floor(minutes / 60)), number.format(minutes % 60));
+    return `- ${label(item.title)} · ${text.node}${text.labelSeparator}${label(item.nodeName || text.unknownNode)}`
+      + ` · ${text.approver}${text.labelSeparator}${label(item.approver || item.approverUserId || text.unknownApprover)}`
+      + ` · ${text.waited}${text.labelSeparator}${waited} · [${text.link}](${item.approvalUrl})`;
   };
-  return [
-    text.title,
-    `${text.process}：${params.title}`,
-    `${text.node}：${params.nodeName || text.unknownNode}`,
-    `${text.approver}：${params.approver || text.unknownApprover}`,
-    `${text.waited}：${duration(params.waitedMs)}（${text.limit} ${duration(params.timeoutMs)}）`,
-    text.repeat,
-    `${text.link}：${params.approvalUrl}`,
-  ].join('\n\n');
+  const render = (entries: T[]): ApprovalTimeoutMessage<T> => {
+    const title = text.title;
+    const summary = text.count(number.format(entries.length));
+    return {
+      items: entries,
+      title,
+      content: `**${title}** · ${summary}\n\n${entries.map(line).join('\n')}`,
+      mentionUserIds: mentionApprovers
+        ? [...new Set(entries.flatMap(item => item.approverUserId ? [item.approverUserId] : []))]
+        : [],
+    };
+  };
+  const fits = (message: ApprovalTimeoutMessage<T>) => Buffer.byteLength(
+    alertMarkdownParams(message.content, message.mentionUserIds, message.title),
+  ) <= MAX_MARKDOWN_PARAM_BYTES;
+  const messages: ApprovalTimeoutMessage<T>[] = [];
+  let pending: ApprovalTimeoutMessage<T> | undefined;
+  for (const item of items) {
+    const extended = render([...(pending?.items ?? []), item]);
+    if (fits(extended)) {
+      pending = extended;
+      continue;
+    }
+    if (pending) messages.push(pending);
+    pending = render([item]);
+    if (!fits(pending)) throw new Error('APPROVAL_TIMEOUT_MESSAGE_TOO_LARGE');
+  }
+  if (pending) messages.push(pending);
+  return messages;
 }

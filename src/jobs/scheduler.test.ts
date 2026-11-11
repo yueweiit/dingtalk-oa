@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
   financial: vi.fn(),
   schedules: [] as Array<{ expression: string; run: () => Promise<void> }>,
   refresh: vi.fn(),
+  timeout: vi.fn(),
 }));
 vi.mock('node-cron', () => ({ default: { schedule: (expression: string, run: () => Promise<void>) => {
   state.schedules.push({ expression, run });
@@ -27,13 +28,15 @@ vi.mock('../config/index.js', () => ({ getConfig: () => ({
   COMPLETED_APPROVAL_REFRESH_MIN_INTERVAL_SECONDS: 21600,
   APPROVAL_STATUS_RECONCILE_CRON: '*/15 * * * *',
   APPROVAL_STATUS_RECONCILE_BATCH_SIZE: 100,
+  APPROVAL_TIMEOUT_MONITOR_CRON: '5,35 * * * *',
 }) }));
 vi.mock('./completed-approval-refresh.js', () => ({ refreshCompletedLogisticsApprovals: state.refresh }));
+vi.mock('./approval-timeout-monitor.js', () => ({ monitorApprovalTimeouts: state.timeout }));
 vi.mock('../db/queries/corp-config.js',()=>({getAllCorpIds:async()=>[{corp_id:'first'},{corp_id:'second'}]}));
 vi.mock('./financial-backfill.js', () => ({ runFinancialBackfill: state.financial }));
 import { startScheduler, stopScheduler } from './scheduler.js';
 
-afterEach(() => { stopScheduler(); state.schedules.length = 0; state.refresh.mockReset(); state.financial.mockReset(); state.financialEnabled=false; state.corpId='corp'; });
+afterEach(() => { stopScheduler(); state.schedules.length = 0; state.refresh.mockReset(); state.timeout.mockReset(); state.financial.mockReset(); state.financialEnabled=false; state.corpId='corp'; });
 
 describe('completed approval refresh scheduling', () => {
   it('has bounded, explicitly enabled configuration', () => {
@@ -64,6 +67,20 @@ describe('completed approval refresh scheduling', () => {
     startScheduler();
     expect(state.schedules.some(row => row.expression === '*/30 * * * *')).toBe(false);
   });
+});
+
+it('does not run another timeout scan while its digests are being sent', async () => {
+  let release!: () => void;
+  state.timeout.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+  startScheduler();
+  const task = state.schedules.find(row => row.expression === '5,35 * * * *')!;
+  const running = task.run();
+  await task.run();
+  expect(state.timeout).toHaveBeenCalledTimes(1);
+  release();
+  await running;
+  await task.run();
+  expect(state.timeout).toHaveBeenCalledTimes(2);
 });
 
 it('drains durable financial history in bounded nonoverlapping scheduled invocations', async () => {

@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { normalizeTasks } from '../normalize/task-normalizer.js';
 import type { ApprovalTask } from '../dingtalk/types.js';
 import { upsertTask } from './queries/approval-task.js';
+import { claimAlertDeliveryBatch, finishAlertDeliveryBatch, renewAlertDeliveryBatch, type AlertDeliveryClaim, type AlertDeliveryTarget } from './queries/alert-notification.js';
 import { findRunningApprovalTimeoutCandidates, monitorApprovalTimeouts } from '../jobs/approval-timeout-monitor.js';
 
 const state = vi.hoisted(() => ({ client: null as pg.Client | null }));
@@ -43,11 +44,19 @@ describe.skipIf(!databaseUrl)('approval timeout task persistence (isolated Postg
       CREATE TEMP TABLE ding_approval_instance (
         corp_id VARCHAR(64), process_instance_id VARCHAR(128), process_code VARCHAR(128), title TEXT,
         status VARCHAR(32), deleted_at TIMESTAMPTZ, create_time TIMESTAMPTZ, raw_payload JSONB
+      );
+      CREATE TEMP TABLE ding_alert_notification (
+        id BIGSERIAL PRIMARY KEY,
+        corp_id VARCHAR(64) NOT NULL, process_instance_id VARCHAR(128) NOT NULL, alert_type VARCHAR(64) NOT NULL,
+        alert_phase VARCHAR(64) NOT NULL, recipient_user_id VARCHAR(128) NOT NULL, status VARCHAR(32) NOT NULL,
+        attempt_count INTEGER NOT NULL, payload JSONB, last_error TEXT, sent_at TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE(corp_id, process_instance_id, alert_type, alert_phase, recipient_user_id)
       );`);
   });
   afterAll(async () => { await state.client?.end(); state.client = null; });
   beforeEach(async () => {
-    await state.client!.query('TRUNCATE pg_temp.ding_approval_task, pg_temp.ding_approval_instance');
+    await state.client!.query('TRUNCATE pg_temp.ding_approval_task, pg_temp.ding_approval_instance, pg_temp.ding_alert_notification');
   });
 
   const initialStart = '2026-11-01T08:00:00+08:00';
@@ -61,17 +70,18 @@ describe.skipIf(!databaseUrl)('approval timeout task persistence (isolated Postg
     await persist({ taskId: 'task-test', status: 'COMPLETED', userId: 'previous-user',
       startTime: initialStart, endTime: initialEnd });
   }
-  async function latestInstance(task: ApprovalTask) {
+  async function latestInstance(...tasks: ApprovalTask[]) {
     await state.client!.query(`INSERT INTO ding_approval_instance
       (corp_id, process_instance_id, process_code, status, create_time, raw_payload)
       VALUES ('corp-test', 'instance-test', 'PROC-TEST', 'RUNNING', $1, $2)`,
-    [initialStart, JSON.stringify({ tasks: [task] })]);
+    [initialStart, JSON.stringify({ tasks })]);
   }
   function reminderDependencies() {
     return {
       now: () => new Date('2026-11-10T08:00:00+08:00'), findCandidates: findRunningApprovalTimeoutCandidates,
-      claimDelivery: vi.fn().mockResolvedValue(true), markSent: vi.fn().mockResolvedValue(undefined),
-      markFailed: vi.fn().mockResolvedValue(undefined), send: vi.fn().mockResolvedValue(undefined),
+      claimDeliveries: (target: AlertDeliveryTarget, items: AlertDeliveryClaim[]) => claimAlertDeliveryBatch(target, items, 1440),
+      renewDeliveries: renewAlertDeliveryBatch,
+      finishDeliveries: finishAlertDeliveryBatch, send: vi.fn().mockResolvedValue(undefined),
       sendGroup: vi.fn().mockResolvedValue(undefined),
     };
   }
@@ -84,8 +94,8 @@ describe.skipIf(!databaseUrl)('approval timeout task persistence (isolated Postg
     await latestInstance(task);
     const deps = reminderDependencies();
     expect((await monitorApprovalTimeouts(deps)).sent).toBe(2);
-    expect(deps.send).toHaveBeenCalledWith(['current-user'], expect.any(String));
-    expect(deps.sendGroup).toHaveBeenCalledWith('cid-test', expect.any(String), ['current-user']);
+    expect(deps.send).toHaveBeenCalledWith(['current-user'], expect.any(String), '审批超时汇总');
+    expect(deps.sendGroup).toHaveBeenCalledWith('cid-test', expect.any(String), ['current-user'], '审批超时汇总');
   });
 
   it('self-corrects a retained end time after the later start time was already persisted', async () => {
@@ -121,6 +131,59 @@ describe.skipIf(!databaseUrl)('approval timeout task persistence (isolated Postg
     const deps = reminderDependencies();
     expect((await monitorApprovalTimeouts(deps)).sent).toBe(1);
     expect(deps.send).not.toHaveBeenCalled();
-    expect(deps.sendGroup).toHaveBeenCalledWith('cid-test', expect.stringContaining('未识别审批人'), []);
+    expect(deps.sendGroup).toHaveBeenCalledWith('cid-test', expect.stringContaining('未识别审批人'), [], '审批超时汇总');
+  });
+
+  it('records one message batch for every included task and deduplicates the next scan', async () => {
+    const tasks = ['task-1', 'task-2'].map(taskId => ({ taskId, status: 'RUNNING', userId: 'current-user', startTime: initialStart }));
+    for (const task of tasks) await persist(task);
+    await latestInstance(...tasks);
+    const deps = reminderDependencies();
+    expect(await monitorApprovalTimeouts(deps)).toEqual({ scanned: 2, eligible: 2, sent: 2, failed: 0 });
+    expect(deps.send).toHaveBeenCalledTimes(1);
+    expect(deps.sendGroup).toHaveBeenCalledTimes(1);
+    const { rows } = await state.client!.query(`SELECT status, payload->>'channel' AS channel,
+      payload->>'batchId' AS batch_id, sent_at FROM pg_temp.ding_alert_notification ORDER BY channel`);
+    expect(rows).toHaveLength(4);
+    expect(rows.every(row => row.status === 'sent' && row.batch_id && row.sent_at)).toBe(true);
+    expect(rows[0]).toEqual(rows[1]);
+    expect(rows[2]).toEqual(rows[3]);
+    expect(rows[0].batch_id).not.toBe(rows[2].batch_id);
+    expect((await monitorApprovalTimeouts(deps)).sent).toBe(0);
+  });
+
+  it('reclaims only an individually due task and ignores an old attempt result', async () => {
+    const target = { corpId: 'corp-test', alertType: 'approval_timeout', recipientUserId: 'current-user' };
+    const items = ['i-1', 'i-2'].map(processInstanceId => ({ processInstanceId, alertPhase: 'daily:test', payload: {} }));
+    const first = await claimAlertDeliveryBatch(target, items, 1440);
+    await finishAlertDeliveryBatch(target, first, 'first');
+    await state.client!.query(`UPDATE pg_temp.ding_alert_notification SET sent_at = now() - interval '24 hours'
+      WHERE process_instance_id = 'i-2'`);
+    const next = await claimAlertDeliveryBatch(target, items, 1440);
+    expect(next).toEqual([{ processInstanceId: 'i-2', alertPhase: 'daily:test', attemptCount: 2 }]);
+    await finishAlertDeliveryBatch(target, first, 'stale', 'late failure');
+    await finishAlertDeliveryBatch(target, next, 'second', 'HTTP 429');
+    const { rows } = await state.client!.query(`SELECT process_instance_id, status, last_error, sent_at IS NOT NULL AS sent_before,
+      payload->>'batchId' AS batch_id FROM pg_temp.ding_alert_notification ORDER BY process_instance_id`);
+    expect(rows).toEqual([
+      { process_instance_id: 'i-1', status: 'sent', last_error: null, sent_before: true, batch_id: 'first' },
+      { process_instance_id: 'i-2', status: 'failed', last_error: 'HTTP 429', sent_before: true, batch_id: 'second' },
+    ]);
+  });
+
+  it('only renews live leases and refuses the previous worker after reclamation', async () => {
+    const target = { corpId: 'corp-test', alertType: 'approval_timeout', recipientUserId: 'current-user' };
+    const items = ['i-1', 'i-2'].map(processInstanceId => ({ processInstanceId, alertPhase: 'daily:test', payload: {} }));
+    const first = await claimAlertDeliveryBatch(target, items, 1440);
+    await state.client!.query(`UPDATE pg_temp.ding_alert_notification SET updated_at = now() - interval '16 minutes'
+      WHERE process_instance_id = 'i-2'`);
+    expect(await renewAlertDeliveryBatch(target, first)).toEqual([expect.objectContaining({ processInstanceId: 'i-1', attemptCount: 1 })]);
+
+    const replacement = await claimAlertDeliveryBatch(target, items, 1440);
+    expect(replacement).toEqual([{ processInstanceId: 'i-2', alertPhase: 'daily:test', attemptCount: 2 }]);
+    expect(await renewAlertDeliveryBatch(target, first.filter(item => item.processInstanceId === 'i-2'))).toEqual([]);
+    expect(await renewAlertDeliveryBatch(target, replacement)).toEqual(replacement);
+    await finishAlertDeliveryBatch(target, replacement, 'replacement');
+    expect(await renewAlertDeliveryBatch(target, replacement)).toEqual([]);
   });
 });

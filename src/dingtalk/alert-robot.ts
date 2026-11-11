@@ -1,4 +1,5 @@
 import { getConfig } from '../config/index.js';
+import { alertMarkdownParams } from './alert-markdown.js';
 
 interface AccessTokenResponse {
   accessToken?: string;
@@ -47,7 +48,7 @@ async function getAccessToken(): Promise<string> {
   return accessToken;
 }
 
-export async function sendAlertChatMessage(userIds: string[], content: string): Promise<void> {
+export async function sendAlertChatMessage(userIds: string[], content: string, title?: string): Promise<void> {
   if (!userIds.length) return;
   const config = requiredRobotConfig();
   const token = await getAccessToken();
@@ -62,7 +63,7 @@ export async function sendAlertChatMessage(userIds: string[], content: string): 
       robotCode: config.DINGTALK_ALERT_ROBOT_CODE,
       userIds,
       msgKey: 'sampleMarkdown',
-      msgParam: JSON.stringify({ title: '统一预警', text: content }),
+      msgParam: alertMarkdownParams(content, [], title),
     }),
   });
   if (!response.ok) {
@@ -79,11 +80,11 @@ export async function sendAlertGroupMessage(
   conversationId: string,
   content: string,
   mentionUserIds: string[] = [],
+  title?: string,
 ): Promise<void> {
   if (!conversationId.trim()) throw new Error('ALERT_ROBOT_GROUP_ID_REQUIRED');
   const atUserIds = [...new Set(mentionUserIds.map((id) => id.trim()).filter(Boolean))];
   // 应用机器人须同时传 atUserIds 和正文 @userId 标记；不能只拼接姓名。
-  const text = atUserIds.length ? `${atUserIds.map((id) => `@${id}`).join(' ')}\n\n${content}` : content;
   const config = requiredRobotConfig();
   const token = await getAccessToken();
   const response = await fetch('https://api.dingtalk.com/v1.0/robot/groupMessages/send', {
@@ -97,7 +98,7 @@ export async function sendAlertGroupMessage(
       robotCode: config.DINGTALK_ALERT_ROBOT_CODE,
       openConversationId: conversationId,
       msgKey: 'sampleMarkdown',
-      msgParam: JSON.stringify({ title: '统一预警', text }),
+      msgParam: alertMarkdownParams(content, atUserIds, title),
       ...(atUserIds.length ? { atUserIds, isAtAll: false } : {}),
     }),
   });
