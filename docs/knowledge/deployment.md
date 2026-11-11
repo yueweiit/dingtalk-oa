@@ -38,6 +38,7 @@
 | 回调 | WEBHOOK_TOKEN、WEBHOOK_AES_KEY；两者缺任一项时拒绝 Webhook |
 | 审批只读 API | 无需 Token 或客户端配置；旧 APPROVAL_READ_API_CLIENTS_JSON 忽略。APPROVAL_READ_API_REQUESTS_PER_MINUTE 默认每进程每来源 IP 120，三个接口共用该来源额度；APPROVAL_READ_API_TOTAL_REQUESTS_PER_MINUTE 默认每进程总查询 1200，参数/游标无效不占用总额度。配置和索引迁移见 [API 模块](../modules/approval-read-api/README.md) |
 | 游标签名 | 默认从现有 DINGTALK_APP_SECRET 按固定用途派生，可选 APPROVAL_READ_API_CURSOR_SECRET（32–256 字符）；各实例签名配置一致即可跨重启续页，轮换后旧游标失效。不是调用鉴权 |
+| FIFO 运营费用 HTTP | OPERATING_EXPENSE_API_CORP_ID 和 OPERATING_EXPENSE_API_TOKEN 同时配置才可调用，OPERATING_EXPENSE_API_PROCESS_CODE 指定模板。走受控内网或 HTTPS 网关，详见 [运营费用读取](../modules/approval-read-api/README.md#运营费用读取) |
 | 可信 HTTP 代理 | HTTP_TRUSTED_PROXIES，默认空；只配置实际代理 IP/CIDR，逗号分隔。本机宝塔 Nginx 通过回环代理时可设 127.0.0.1,::1；未配置时转发头不影响来源，代理后请求按代理 IP 共用额度 |
 | API 文件下载超时 | APPROVAL_READ_API_DOWNLOAD_OPEN_TIMEOUT_MS 默认 10000、APPROVAL_READ_API_DOWNLOAD_IDLE_TIMEOUT_MS 默认 30000、APPROVAL_READ_API_DOWNLOAD_TOTAL_TIMEOUT_MS 默认 300000；超时实际取消存储请求，仅影响 HTTP 下载 |
 | Kafka | KAFKA_BROKERS、KAFKA_CLIENT_ID、KAFKA_GROUP_ID；未配置 brokers 时 consumer 禁用但 outbox 持续留存 |

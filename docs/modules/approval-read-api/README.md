@@ -106,6 +106,30 @@ curl --get 'https://oa.example.com/api/v1/approvals' \
 
 `rawPayload` 完整返回本地保存的原始 JSON，包含已归档的表单、任务、操作记录、评论、附件引用及上游扩展字段；不截断、不重写内部 JSON 字符串。它是当前本地快照，既不是钉钉实时查询，也不是所有历史版本列表。不存在的上游内容不会补造。`formComponentValues` 为规范化表单；业务状态、原始名称和 rawPayload 内的时间原样保留。外层数据库时间按 UTC 输出并保留微秒，避免翻页丢失精度。
 
+## 运营费用读取
+
+`GET /api/v1/reporting/operating-expenses` 供 FIFO 后端读取 OA 月度费用。查询参数 `corpId`、`startMonth`、`endMonth` 都必填，月份为 `YYYY-MM`，包含起止月份，单次最多 12 个月。配置 `OPERATING_EXPENSE_API_CORP_ID` 和 `OPERATING_EXPENSE_API_TOKEN` 后启用，凭据使用独立随机值，允许 32–256 位字母、数字、下划线或连字符，通过 `Authorization: Bearer …` 发送。企业必须与服务配置一致。模板由 `OPERATING_EXPENSE_API_PROCESS_CODE` 指定，默认沿用 FIFO 的运营支出流程码。接入前核对实际企业、模板、组件及人民币口径。
+
+成功响应包含 `success`、`corpId`、`startMonth`、`endMonth`、`data`、`warnings`。每行含 `expenseType`、`month`、`departmentName`、`amount`、`currency`、`approvalCount`。金额为十进制字符串，三个科目沿用 FIFO 的人民币口径。单数按审批实例在各汇总组计一次。
+
+| expenseType | 汇总口径 |
+| --- | --- |
+| office_space | 按申请月份汇总指定办公明细组件中拉丁购部门的租金与电费，`departmentName` 为 null。 |
+| china_salary | 按申请月份和明细部门汇总工资中国。 |
+| shared_admin | 按费用所属月份和明细部门汇总，每张单对每个不同部门计一次原金额。所属月份缺失时从事项说明识别唯一月份，允许晚提交。 |
+
+待核对记录含 `expenseType`、`processInstanceId` 和 `departmentNames`，办公费用适用于均摊范围，其部门数组为空。
+
+| 警示码 | 处理规则 |
+| --- | --- |
+| `EXPENSE_MONTH_UNRESOLVED` | 分摊费用所属月份无法确定，相关金额留待核对。 |
+| `APPLICATION_MONTH_UNRESOLVED` | 办公费用或工资的申请月份无法确定，相关金额留待核对。历史申请日期明确指向查询区间以外时跳过，即使同单存在多个区间外的月份。 |
+| `EXPENSE_CURRENCY_UNSUPPORTED` | 金额的币种明确为非人民币、无法识别或信息冲突时排除对应金额，附 `month`。优先使用金额和明细行的币种信息，再取表单币种。无币种信息的历史金额沿用人民币口径。 |
+
+待核对记录随已确认的汇总返回。归期不明的记录可能影响查询区间，无法定位月份时由 FIFO 按店铺提示核对。查询读取指定企业和模板下已通过、未删除的本地审批。FIFO 保留启用店铺均摊、部门名匹配、人工薪资与费用台账的核算规则。
+
+错误使用 `success:false` 和 `code`。无效参数返回 400，凭据错误返回 401，企业越权返回 403。未启用返回 503 `OPERATING_EXPENSE_API_DISABLED`，模板不存在、查询或汇总失败返回 503 `OPERATING_EXPENSE_READ_UNAVAILABLE`。读取失败与成功返回空数组可分别处理。实际归档覆盖与两条取数链路的金额一致性待联调。实现见[路由](../../../src/reporting/index.ts)、[汇总](../../../src/reporting/operating-expenses.ts)与[查询](../../../src/db/queries/operating-expenses.ts)。
+
 ## 附件返回与文件下载
 
 附件行同样包含 corpId、processInstanceId、approvalNo、processCode、templateName，并返回：

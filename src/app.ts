@@ -4,6 +4,7 @@ import { getConfig } from './config/index.js';
 import { webhookRoutes } from './webhook/index.js';
 import { connectorRoutes } from './connector/index.js';
 import { approvalReadRoutes } from './approval-api/index.js';
+import { operatingExpenseRoutes } from './reporting/index.js';
 import { getPool } from './db/pool.js';
 import { tokenManager } from './dingtalk/token-manager.js';
 import { getKafkaConsumerHealth, isKafkaConsumerHealthy } from './kafka/consumer.js';
@@ -40,6 +41,7 @@ export async function createApp() {
   await fastify.register(webhookRoutes);
   await fastify.register(connectorRoutes);
   await fastify.register(approvalReadRoutes);
+  await fastify.register(operatingExpenseRoutes);
 
   // 健康检查：存活检查（仅判断服务进程是否活着）
   fastify.get('/health/live', async (request, reply) => {

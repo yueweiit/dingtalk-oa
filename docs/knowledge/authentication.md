@@ -21,6 +21,8 @@
 
 [Webhook](../../src/webhook/index.ts) 在配置缺失时拒绝；读取 x-dingtalk-timestamp、x-dingtalk-sign 并调用 [verifySignature](../../src/dingtalk/signature.ts)。现有实现使用 timestamp 与 token 组成签名材料、AES_KEY 作为 HMAC 密钥；body 参数未参与签名，未检查时间戳窗口。timingSafeEqual 对不同长度会抛错，路由捕获后返回 500。decryptMessage 虽存在，但当前路由未调用。不能将其描述为已验证完整实现钉钉官方加密回调协议。
 
+`GET /api/v1/reporting/operating-expenses` 使用独立 Bearer 凭据，绑定 `OPERATING_EXPENSE_API_CORP_ID` 和服务端配置的模板。企业或凭据未配置时接口返回 503。请求无法指定任意流程，返回结果仅包含月度汇总与归期核对信息。建议由 FIFO 后端通过受控内网或 HTTPS 网关调用。详见[运营费用读取契约](../modules/approval-read-api/README.md#运营费用读取)。
+
 ## 数据库角色与企业隔离
 
 - 成本读取通过 costing_read 视图，迁移向**已存在**的 costing_reader 授予 SELECT；若角色后建，不会自动补齐历史迁移授权。

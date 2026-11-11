@@ -16,6 +16,7 @@
 | GET /api/v1/approvals | 企业、流程、编号、更新时间、游标；完整审批 JSON、审批编号和表名称 | 无需鉴权；corpId 必填，流程可选；包含删除标记 |
 | GET /api/v1/attachments | 企业、流程、编号、更新时间、游标；附件清单及下载路径 | 同上；独立附件水位及退役标记 |
 | GET /api/v1/attachment-content | corpId、processInstanceId、fileId；流式下载已归档文件 | 无需鉴权并复查来源/文件状态；404 不存在或退役，409 未就绪；首字节前失败 503、超时 504，传输开始后异常则断流 |
+| GET /api/v1/reporting/operating-expenses | corpId、startMonth、endMonth；按月和部门返回三类 OA 运营费用及归期异常 | 独立 Bearer 与企业绑定；400 参数错误、401 凭据错误、403 企业越权、503 未启用或读取失败 |
 
 完整调用、配置、分页、返回和错误码见 [审批读取 API](../modules/approval-read-api/README.md)。该接口按请求指定的企业和可选流程查询源归档；企业筛选不构成访问授权，不套用 costing_read 视图白名单，也不扩大已有附件收集范围。
 

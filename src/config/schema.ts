@@ -79,6 +79,12 @@ export const configSchema = z.object({
   APPROVAL_READ_API_DOWNLOAD_IDLE_TIMEOUT_MS: z.coerce.number().int().min(100).max(300000).default(30000),
   APPROVAL_READ_API_DOWNLOAD_TOTAL_TIMEOUT_MS: z.coerce.number().int().min(1000).max(3600000).default(300000),
 
+  // Dedicated server-to-server access for the operating expense report.
+  OPERATING_EXPENSE_API_TOKEN: z.string().trim().regex(/^[A-Za-z0-9_-]{32,256}$/).optional().or(z.literal('')),
+  OPERATING_EXPENSE_API_CORP_ID: z.string().trim().max(64).optional(),
+  OPERATING_EXPENSE_API_PROCESS_CODE: z.string().trim().min(1).max(128)
+    .default('PROC-E7BC3316-E618-4812-BDCC-7A655A7C694B'),
+
   // Backfill
   BACKFILL_LOOKBACK_DAYS: z.coerce.number().default(1),
   BACKFILL_WINDOW_DAYS: z.coerce.number().default(30),

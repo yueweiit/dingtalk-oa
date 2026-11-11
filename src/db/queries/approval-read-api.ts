@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import { withClient } from '../pool.js';
+import { withReadOnlyTransaction } from '../read-only.js';
 import type { JsonValue } from '../json-types.js';
 import { filtersSchema, type ReadFilters, type ReadPosition, type ReadResource } from '../../approval-api/pagination.js';
 
@@ -108,24 +108,9 @@ const attachmentColumns = `a.corp_id AS "corpId", a.process_instance_id AS "proc
   ${timestamp('a.archived_at')} AS "archivedAt", ${timestamp('a.updated_at')} AS "updatedAt",
   ${timestamp('a.retired_at')} AS "retiredAt", ${timestamp('i.deleted_at')} AS "sourceDeletedAt"`;
 
-async function readOnly<T>(run: (client: pg.PoolClient) => Promise<T>): Promise<T> {
-  return withClient(async client => {
-    await client.query('BEGIN READ ONLY');
-    try {
-      await client.query("SET LOCAL statement_timeout = '15s'");
-      const result = await run(client);
-      await client.query('COMMIT');
-      return result;
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    }
-  });
-}
-
 async function readPage<T extends pg.QueryResultRow>(resource: ReadResource, input: ReadPageRequest): Promise<ReadPage<T>> {
   const { values, param, conditions } = filterWhere(input.filters);
-  return readOnly(async client => {
+  return withReadOnlyTransaction(async client => {
     const syncUntil = input.syncUntil ?? (await client.query<{ syncUntil: string }>(
       `SELECT ${timestamp('clock_timestamp()')} AS "syncUntil"`,
     )).rows[0].syncUntil;
@@ -159,7 +144,7 @@ export async function findReadAttachment(
 ): Promise<DownloadAttachment | undefined> {
   const { values, param, conditions } = filterWhere(filters);
   conditions.push(`a.file_id=${param(fileId)}`);
-  return readOnly(async connection => (await connection.query<DownloadAttachment>(
+  return withReadOnlyTransaction(async connection => (await connection.query<DownloadAttachment>(
     `SELECT ${attachmentColumns}, a.bucket, a.object_key AS "objectKey"
      FROM costing_read.attachment_archive a JOIN public.ding_approval_instance i
        ON i.corp_id=a.corp_id AND i.process_instance_id=a.process_instance_id
