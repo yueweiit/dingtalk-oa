@@ -103,6 +103,110 @@ describe('monthly operating expenses', () => {
     expect(readForms).not.toHaveBeenCalled();
   });
 
+  it('reports late salary and shared management fees in the stated month', async () => {
+    const salary = { name: fields.management, value: fields.salary };
+    const detail = { label: '明细detalle', value: [row('店铺 A', 'one', '', '5,477.25'), row('店铺 B', 'two', '', '5,849.28')] };
+    const { server } = await setup(vi.fn(async () => [
+      form('november-submission', [
+        applicationDate, salary, detail,
+        { name: fields.sharedAdmin, value: '1,217.33' },
+        { name: '事项说明Explicación de asuntos', value: '1.2026年10月测试店铺薪资共11326.53元。2.10月份补缴差额。' },
+      ]),
+      form('explicit-priority', [
+        applicationDate, salary,
+        { name: '费用所属月份', value: '2026-10' },
+        { name: '事项说明', value: '参照2026年9月薪资' },
+        { label: '明细', value: [row('店铺 C', 'three', '', '10.00')] },
+      ]),
+      form('conflicting-months', [
+        applicationDate, salary,
+        { name: '事项说明', value: '2026年10月工资和2026年11月工资' },
+        { label: '明细', value: [row('店铺 C', 'three', '', '300.00')] },
+      ]),
+    ]));
+
+    const october = await server.inject({ url: path + '?' + query.replace('endMonth=2026-11', 'endMonth=2026-10'), headers });
+    expect(october.statusCode).toBe(200);
+    expect(october.json().data).toEqual([
+      ['china_salary', '2026-10', '店铺 A', '5477.25'],
+      ['china_salary', '2026-10', '店铺 B', '5849.28'],
+      ['china_salary', '2026-10', '店铺 C', '10.00'],
+      ['shared_admin', '2026-10', '店铺 A', '1217.33'],
+      ['shared_admin', '2026-10', '店铺 B', '1217.33'],
+    ].map(([expenseType, month, departmentName, amount]) =>
+      ({ expenseType, month, departmentName, amount, currency: 'CNY', approvalCount: 1 })));
+    const november = await server.inject({ url: path + '?' + query.replace('startMonth=2026-10', 'startMonth=2026-11'), headers });
+    expect(november.statusCode).toBe(200);
+    expect(november.json().data).toEqual([]);
+    expect(november.json().warnings).toEqual([{
+      code: 'APPLICATION_MONTH_UNRESOLVED', expenseType: 'china_salary',
+      processInstanceId: 'conflicting-months', departmentNames: ['店铺 C'],
+    }]);
+  });
+
+  it('ignores reference months and recognizes a stated payroll month alongside a reference', async () => {
+    const salary = { name: fields.management, value: fields.salary };
+    const sharedAdmin = { name: fields.sharedAdmin, value: '30.00' };
+    const detail = (department: string) => ({ label: '明细', value: [row(department, 'one', '', '100.00')] });
+    const { server } = await setup(vi.fn(async () => [
+      form('reference-only', [
+        applicationDate, salary, sharedAdmin, detail('店铺 A'),
+        { name: '事项说明', value: '本月工资，参考2026年9月审批的工资标准。' },
+      ]),
+      form('salary-standard', [
+        applicationDate, salary, detail('店铺 B'),
+        { name: '事项说明', value: '2026年9月工资标准继续执行，本月发放。' },
+      ]),
+      form('stated-payroll-month', [
+        applicationDate, salary, sharedAdmin, detail('店铺 C'),
+        { name: '事项说明', value: '2026年10月工资参考2026年9月审批的标准。' },
+      ]),
+      form('past-payroll-as-reference', [
+        applicationDate, salary, detail('店铺 D'),
+        { name: '事项说明', value: '2026年9月工资作为本月参考，本月工资按新标准发放。' },
+      ]),
+    ]));
+    const response = await server.inject({ url: path + '?' + query.replace('startMonth=2026-10', 'startMonth=2026-09'), headers });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toEqual([
+      ['china_salary', '2026-10', '店铺 C', '100.00'],
+      ['china_salary', '2026-11', '店铺 A', '100.00'],
+      ['china_salary', '2026-11', '店铺 B', '100.00'],
+      ['china_salary', '2026-11', '店铺 D', '100.00'],
+      ['shared_admin', '2026-10', '店铺 C', '30.00'],
+    ].map(([expenseType, month, departmentName, amount]) =>
+      ({ expenseType, month, departmentName, amount, currency: 'CNY', approvalCount: 1 })));
+    expect(response.json().warnings).toEqual([{
+      code: 'EXPENSE_MONTH_UNRESOLVED', expenseType: 'shared_admin',
+      processInstanceId: 'reference-only', departmentNames: ['店铺 A'],
+    }]);
+  });
+
+  it('keeps month conflict warnings within ranges their candidates could affect', async () => {
+    const payroll = [
+      { name: fields.management, value: fields.salary },
+      { name: fields.sharedAdmin, value: '30.00' },
+      { label: '明细', value: [row('店铺 A', 'one', '', '100.00')] },
+    ];
+    const monthField = (value: string) => ({ name: '费用所属月份', value });
+    const { server } = await setup(vi.fn(async () => [
+      form('historical-description', [
+        ...payroll, { ...applicationDate, value: '2024-11-11' },
+        { name: '事项说明', value: '2024年9月和2024年10月工资。' },
+      ]),
+      form('historical-explicit', [...payroll, applicationDate, monthField('2024-09'), monthField('2024-10')]),
+      form('overlapping-conflict', [...payroll, applicationDate, monthField('2024-09'), monthField('2026-10')]),
+      form('unknown-month', [...payroll, applicationDate, monthField('2024-09'), monthField('待确认')]),
+    ]));
+    const response = await server.inject({ url: path + '?' + query, headers });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toEqual([]);
+    expect(response.json().warnings).toEqual(['overlapping-conflict', 'unknown-month'].flatMap(processInstanceId => [
+      { code: 'APPLICATION_MONTH_UNRESOLVED', expenseType: 'china_salary', processInstanceId, departmentNames: ['店铺 A'] },
+      { code: 'EXPENSE_MONTH_UNRESOLVED', expenseType: 'shared_admin', processInstanceId, departmentNames: ['店铺 A'] },
+    ]));
+  });
+
   it('keeps valid approvals readable when legacy application dates are ambiguous or invalid', async () => {
     const dateFields = (...values: string[]) => values.map(value => ({ ...applicationDate, value }));
     const salary = { name: fields.management, value: fields.salary };

@@ -165,6 +165,11 @@ function monthFromDate(value: string): string | null {
 }
 
 const chineseMonth = /(?<!\d)(\d{4})\s*年\s*(\d{1,2})\s*月(?:份)?/g;
+const payrollTerm = /薪资|工资|薪酬|月薪|\bsalario\b|\bnómina\b/i;
+const payrollReference = /参考|参照|比照|对照|沿用|详见|参见|工资标准|薪资标准|(?:按|以|依据)\s*(?=\d{4}\s*年)|\breferencia\b/i;
+const payrollAsReference = /(?:作为|用作|仅作|仅供|供)\s*(?:本月|本期|本次)?\s*(?:参考|参照|比照|对照)/;
+const payrollMonthLabel = /^(?:(?:本次|本期)\s*)?(?:工资|薪资|薪酬|月薪|费用)\s*(?:所属|归属)?\s*(?:年月|月份)\s*(?:[:：]|为|是)?$/;
+const payrollPaymentLead = /^(?:(?:本次|本期)\s*)?(?:申请(?:发放)?|发放|补发|支付|计提|核算)?$/;
 
 function parseExpenseMonth(value: string): string | null {
   const chinese = /^(\d{4})\s*年\s*(\d{1,2})\s*月(?:份)?$/.exec(value);
@@ -172,13 +177,40 @@ function parseExpenseMonth(value: string): string | null {
   return monthFromDate(iso.length === 7 ? iso + '-01' : iso);
 }
 
-function sharedAdminMonth(form: Field[]): string | null {
+function salaryMonthsInDescription(description: string): string[] {
+  return description.split(/[。！？；;，,\r\n]+/).flatMap(clause => {
+    const statement = clause.trim().replace(/^(?:[（(]\d+[)）]|\d+[.．、)）])\s*/, '');
+    const matches = [...statement.matchAll(chineseMonth)];
+    if (!matches.length) return [];
+    const first = matches[0];
+    const lead = statement.slice(0, first.index).trim();
+    const detailStart = first.index + first[0].length;
+    const detail = statement.slice(detailStart);
+    const reference = detail.search(payrollReference);
+    const asReference = detail.search(payrollAsReference);
+    if (asReference >= 0 && asReference < reference) return [];
+    const payroll = detail.search(payrollTerm);
+    const cutoff = reference < 0 ? statement.length : detailStart + reference;
+    if (!payrollMonthLabel.test(lead)
+        && (!payrollPaymentLead.test(lead) || payroll < 0 || detailStart + payroll >= cutoff)) return [];
+    return matches.filter(match => match.index < cutoff).map(match => match[0]);
+  });
+}
+
+function expensePeriod(form: Field[], isSalary: boolean, inRange: (month: string) => boolean) {
   const explicit = form.filter(field => name(field) === expenseMonthField)
     .map(field => typeof field.value === 'string' ? field.value.trim() : '').filter(Boolean);
-  const descriptions = form.flatMap(field => descriptionFields.has(name(field)) && typeof field.value === 'string'
-    ? [...field.value.matchAll(chineseMonth)].map(match => match[0]) : []);
-  const months = new Set((explicit.length ? explicit : descriptions).map(parseExpenseMonth));
-  return months.size === 1 ? [...months][0] : null;
+  const candidates = explicit.length ? explicit : form.flatMap(field => {
+    if (!descriptionFields.has(name(field)) || typeof field.value !== 'string') return [];
+    return isSalary ? salaryMonthsInDescription(field.value)
+      : [...field.value.matchAll(chineseMonth)].map(match => match[0]);
+  });
+  if (!candidates.length) return undefined;
+  const months = [...new Set(candidates.map(parseExpenseMonth))];
+  return {
+    month: months.length === 1 ? months[0] : null,
+    outOfRange: months.every(month => month !== null && !inRange(month)),
+  };
 }
 
 function applicationMonth(form: Field[], inRange: (month: string) => boolean) {
@@ -219,20 +251,25 @@ export function summarizeOperatingExpenses(forms: OperatingExpenseForm[], range:
         ...(month ? { month } : {}) });
     };
     const kinds = new Set(form.filter(field => field.name === operatingExpenseFields.management).map(field => field.value));
-    if (kinds.has(operatingExpenseFields.office) || kinds.has(operatingExpenseFields.salary)) {
-      const { month, outOfRange } = applicationMonth(form, inRange);
-      if (!outOfRange) {
-        if (kinds.has(operatingExpenseFields.office)) {
-          const lines = [...officeLines(form)].filter(line => hasValue(line.field));
-          if (lines.length && !month) {
-            warn('APPLICATION_MONTH_UNRESOLVED', 'office_space', []);
-          } else if (month) {
-            const subtotal = cnySubtotal(lines, formCurrencies);
-            if (subtotal.amount.units !== 0n) accumulate('office_space', month, null, subtotal.amount);
-            if (subtotal.currencyUnresolved) warn('EXPENSE_CURRENCY_UNSUPPORTED', 'office_space', [], month);
-          }
+    const isSalary = kinds.has(operatingExpenseFields.salary);
+    const sharedLines = form.filter(field => name(field) === operatingExpenseFields.sharedAdmin && hasValue(field));
+    const statedPeriod = isSalary || sharedLines.length ? expensePeriod(form, isSalary, inRange) : undefined;
+    if (kinds.has(operatingExpenseFields.office) || isSalary) {
+      const application = applicationMonth(form, inRange);
+      if (kinds.has(operatingExpenseFields.office) && !application.outOfRange) {
+        const { month } = application;
+        const lines = [...officeLines(form)].filter(line => hasValue(line.field));
+        if (lines.length && !month) {
+          warn('APPLICATION_MONTH_UNRESOLVED', 'office_space', []);
+        } else if (month) {
+          const subtotal = cnySubtotal(lines, formCurrencies);
+          if (subtotal.amount.units !== 0n) accumulate('office_space', month, null, subtotal.amount);
+          if (subtotal.currencyUnresolved) warn('EXPENSE_CURRENCY_UNSUPPORTED', 'office_space', [], month);
         }
-        if (kinds.has(operatingExpenseFields.salary)) {
+      }
+      if (isSalary) {
+        const { month, outOfRange } = statedPeriod ?? application;
+        if (!outOfRange) {
           const salaries = new Map<string, AmountLine[]>();
           for (const { departmentName, cells } of detailRows(form)) {
             const field = findCell(cells, ['金额', 'monto', 'importe']);
@@ -246,7 +283,7 @@ export function summarizeOperatingExpenses(forms: OperatingExpenseForm[], range:
           } else if (month) {
             const unknownCurrencies = [];
             for (const [departmentName, lines] of salaries) {
-              const subtotal = cnySubtotal(lines, formCurrencies);
+              const subtotal = cnySubtotal(lines, formCurrencies, true);
               if (subtotal.hasAmount) accumulate('china_salary', month, departmentName, subtotal.amount);
               if (subtotal.currencyUnresolved) unknownCurrencies.push(departmentName);
             }
@@ -256,10 +293,8 @@ export function summarizeOperatingExpenses(forms: OperatingExpenseForm[], range:
       }
     }
 
-    const sharedLines = form.filter(field => name(field) === operatingExpenseFields.sharedAdmin && hasValue(field));
-    if (!sharedLines.length) continue;
-    const month = sharedAdminMonth(form);
-    if (month && !inRange(month)) continue;
+    if (!sharedLines.length || statedPeriod?.outOfRange) continue;
+    const month = statedPeriod?.month;
     const shared = cnySubtotal(sharedLines.map(field => ({ field })), formCurrencies, true);
     if (shared.amount.units === 0n && !shared.currencyUnresolved) continue;
     const departments = [...new Set([...detailRows(form)].map(row => row.departmentName))].sort();
