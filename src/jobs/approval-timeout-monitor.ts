@@ -204,6 +204,9 @@ export async function monitorApprovalTimeouts(
   const chineseUserIds = new Set(parseList(config.APPROVAL_TIMEOUT_ZH_USER_IDS));
   const snapshotNames = new Map<string, string | null>();
   const processScope = new Set(processCodes);
+  const pausedInstances = new Set(config.APPROVAL_TIMEOUT_PAUSED_INSTANCES
+    .filter(([enterprise]) => enterprise === corpId)
+    .map(([, instanceId]) => instanceId));
   const now = dependencies.now();
   const timeoutMinutes = config.APPROVAL_TIMEOUT_MINUTES;
   const timeoutMs = timeoutMinutes * 60_000;
@@ -226,6 +229,7 @@ export async function monitorApprovalTimeouts(
 
   const resolve = (candidate: ApprovalTimeoutCandidate): PendingDelivery | null => {
     if (candidate.corpId !== corpId || !processScope.has(candidate.processCode)) return null;
+    if (pausedInstances.has(candidate.processInstanceId)) return null;
     const snapshot = currentTaskSnapshot(candidate);
     if (!snapshot) return null;
     const startedAt = currentNodeStart(candidate);

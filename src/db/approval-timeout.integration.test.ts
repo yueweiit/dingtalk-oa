@@ -16,6 +16,7 @@ vi.mock('./pool.js', () => ({
 }));
 vi.mock('../config/index.js', () => ({ getConfig: () => ({
   DINGTALK_CORP_ID: 'corp-test', APPROVAL_TIMEOUT_PROCESS_CODES: 'PROC-TEST',
+  APPROVAL_TIMEOUT_PAUSED_INSTANCES: [],
   APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS: 'cid-test', APPROVAL_TIMEOUT_MINUTES: 4320,
   APPROVAL_TIMEOUT_ES_USER_IDS: '',
   APPROVAL_TIMEOUT_ZH_USER_IDS: '',

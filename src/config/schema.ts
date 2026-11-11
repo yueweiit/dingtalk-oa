@@ -37,6 +37,10 @@ const packingWorkbooksSchema = z.string().default('[]').transform((value, contex
   return result.data;
 });
 
+const pausedApprovalInstancesSchema = z.string().default('')
+  .transform(value => value.split(/[\s,;]+/).filter(Boolean).map(entry => entry.split(':')))
+  .pipe(z.array(z.tuple([z.string().min(1).max(64), z.string().min(1).max(128)])));
+
 export const configSchema = z.object({
   // PostgreSQL
   PGHOST: z.string().default('localhost'),
@@ -118,6 +122,7 @@ export const configSchema = z.object({
   DINGTALK_ALERT_CLIENT_SECRET: z.string().trim().min(1).optional(),
   DINGTALK_ALERT_RECIPIENT_USER_IDS: z.string().default(''),
   APPROVAL_TIMEOUT_PROCESS_CODES: z.string().default(''),
+  APPROVAL_TIMEOUT_PAUSED_INSTANCES: pausedApprovalInstancesSchema,
   APPROVAL_TIMEOUT_ES_USER_IDS: z.string().default(''),
   APPROVAL_TIMEOUT_ZH_USER_IDS: z.string().default(''),
   APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS: z.string().default(''),

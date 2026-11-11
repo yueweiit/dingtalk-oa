@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
     DINGTALK_CORP_ID: 'corp-1',
     DINGTALK_ALERT_RECIPIENT_USER_IDS: 'old-fixed-receiver',
     APPROVAL_TIMEOUT_PROCESS_CODES: 'PROC-TEST',
+    APPROVAL_TIMEOUT_PAUSED_INSTANCES: [] as [string, string][],
     APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS: '',
     APPROVAL_TIMEOUT_ES_USER_IDS: '',
     APPROVAL_TIMEOUT_ZH_USER_IDS: '',
@@ -51,6 +52,7 @@ function dependencies(hour = 72, candidates = [candidate()]) {
 beforeEach(() => {
   state.config.DINGTALK_CORP_ID = 'corp-1';
   state.config.APPROVAL_TIMEOUT_PROCESS_CODES = 'PROC-TEST';
+  state.config.APPROVAL_TIMEOUT_PAUSED_INSTANCES = [];
   state.config.APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS = '';
   state.config.APPROVAL_TIMEOUT_ES_USER_IDS = '';
   state.config.APPROVAL_TIMEOUT_ZH_USER_IDS = '';
@@ -60,6 +62,38 @@ beforeEach(() => {
 });
 
 describe('approval timeout reminders', () => {
+  it('keeps every node of a paused instance out of claims, personal digests and group mentions', async () => {
+    state.config.APPROVAL_TIMEOUT_PAUSED_INSTANCES = [['corp-1', 'instance-1'], ['corp-2', 'instance-2']];
+    state.config.APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS = 'cid-group';
+    const deps = dependencies(72, [
+      candidate({ title: '暂停的审批', approverUserId: 'paused-approver' }),
+      candidate({ title: '暂停的并行节点', taskId: 'task-parallel', approverUserId: 'paused-other' }),
+      candidate({ processInstanceId: 'instance-2', taskId: 'task-2' }),
+    ]);
+
+    expect(await monitorApprovalTimeouts(deps)).toEqual({ scanned: 3, eligible: 1, sent: 2, failed: 0 });
+    expect(deps.findApproverProfiles.mock.calls).toEqual([['corp-1', ['approver-1']]]);
+    expect(deps.claimDeliveries.mock.calls.flatMap(([, items]) => items.map(item => item.processInstanceId)))
+      .toEqual(['instance-2', 'instance-2']);
+    expect(deps.send).toHaveBeenCalledWith(['approver-1'], expect.stringContaining('instanceId=instance-2'), chineseTitle);
+    expect(deps.sendGroup).toHaveBeenCalledWith('cid-group', expect.stringContaining('instanceId=instance-2'), ['approver-1'], chineseTitle);
+    expect(deps.send.mock.calls[0][1]).not.toContain('暂停的');
+    expect(deps.sendGroup.mock.calls[0][1]).not.toContain('暂停的');
+
+    state.config.APPROVAL_TIMEOUT_PAUSED_INSTANCES = [];
+    expect((await monitorApprovalTimeouts(dependencies())).sent).toBe(2);
+  });
+
+  it('parses an empty or enterprise-qualified pause list and rejects malformed entries', () => {
+    const environment = { PGUSER: 'x', PGPASSWORD: 'x', PGDATABASE: 'x', DINGTALK_APP_KEY: 'x', DINGTALK_APP_SECRET: 'x' };
+    expect(configSchema.parse(environment).APPROVAL_TIMEOUT_PAUSED_INSTANCES).toEqual([]);
+    expect(configSchema.parse({ ...environment, APPROVAL_TIMEOUT_PAUSED_INSTANCES: 'corp-1:i_A, corp-2:i-B;corp-1:i_C' })
+      .APPROVAL_TIMEOUT_PAUSED_INSTANCES).toEqual([['corp-1', 'i_A'], ['corp-2', 'i-B'], ['corp-1', 'i_C']]);
+    for (const entry of ['i_A', ':i_A', 'corp-1:', 'corp-1:i_A:extra']) {
+      expect(configSchema.safeParse({ ...environment, APPROVAL_TIMEOUT_PAUSED_INSTANCES: entry }).success).toBe(false);
+    }
+  });
+
   it('waits a full 72 hours and sends to the task approver instead of fixed recipients', async () => {
     const early = dependencies(72 - 1 / 3600);
     expect((await monitorApprovalTimeouts(early)).sent).toBe(0);
