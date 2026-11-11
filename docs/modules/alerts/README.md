@@ -20,9 +20,13 @@
 
 默认 `APPROVAL_TIMEOUT_MINUTES=4320`。未满 72 小时不提醒，达到阈值后不再设结束窗口；每个投递目标上次成功发送满 24 小时后重新领取。故障恢复只发送当前一次，不补发多天历史；每天按成功发送时间滚动计时，实际发送在下一次 Cron 扫描（默认延迟不超过约 30 分钟，另受执行耗时和故障影响）。旧前后窗口配置保留解析兼容但不再使用；已有环境若显式设置旧阈值，须更新为 4320。
 
-个人接收人优先取实例最新 `tasks` 中对应任务的 `userId`；实例详情没有 `tasks` 数组时，使用任务自身的非空原始快照。上述快照存在但人员缺失、为空或仅含空白时，不回退 COALESCE 保留的历史人员列、旧任务快照、固定接收人或发起人；个人不发送，群提醒不 @ 且显示未知审批人。只有实例和任务均无可用原始任务快照的历史行才兼容读取 `ding_approval_task.approver_user_id`。姓名同样优先取当前快照，缺失时显示当前 userId，避免展示历史人员姓名。并行任务分别发送给各自审批人；最新快照已转交时使用其当前人员。缺少审批人时记录 `APPROVAL_TIMEOUT_APPROVER_MISSING`。
+个人接收人优先取实例最新 `tasks` 中对应任务的 `userId`；实例详情没有 `tasks` 数组时，使用任务自身的非空原始快照。上述快照存在但人员缺失、为空或仅含空白时，不回退 COALESCE 保留的历史人员列、旧任务快照、固定接收人或发起人；个人不发送，群提醒不 @ 且显示未知审批人。只有实例和任务均无可用原始任务快照的历史行才兼容读取 `ding_approval_task.approver_user_id`。显示名按企业和当前账号批量读取 `ding_user_snapshot` 的当前成功姓名，并在本轮扫描内复用。缺少快照姓名时，只采用原始任务数据中与当前 `userId` 一起记录的姓名。两处都没有可核实姓名时，显示当前 `userId`。并行任务发给各自审批人。缺少审批人时记录 `APPROVAL_TIMEOUT_APPROVER_MISSING`。
 
-可选 `APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS` 为机器人所在企业群的 `openConversationId` 列表（逗号、分号或空白分隔并去重），留空仅发个人。群与个人使用同一独立机器人应用；群发送使用 `/v1.0/robot/groupMessages/send`，Markdown 显示流程、节点、待审批人、等待时长及审批链接，并 @ 当前任务对应的审批人。群发送函数接收审批人 userId 列表，去空去重后同时设置顶层 `atUserIds`、`isAtAll=false`，并在正文添加 `@userId` 标记；缺少审批人时仍发普通群提醒，不回退 @ 全员或其他固定接收人。@ 参数依据 [发送方 SDK](https://github.com/DingTalk-Real-AI/dingtalk-channel-sdk-python/blob/main/src/dingtalk_channel_sdk/send.py) 和 [CLI 群 @ 规范](https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli/blob/main/skills/mono/references/products/chat.md#机器人-指定人发群消息)，实际群内通知效果待联调。每个任务单独发消息，未做同批汇总。接口字段依据 [钉钉官方 SDK @alicloud/dingtalk](https://www.npmjs.com/package/@alicloud/dingtalk) 的 `robot_1_0.orgGroupSendWithOptions`；[选择群会话](https://open.dingtalk.com/tools/explorer/jsapi?id=10303) 返回 `openConversationId`。机器人入群、发送权限及真实送达需部署后联调。
+可选 `APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS` 为机器人所在企业群的 `openConversationId` 列表（逗号、分号或空白分隔并去重），留空仅发个人。群与个人使用同一独立机器人应用。每次扫描按个人和群分别汇总，Markdown 清单逐项展示审批标题、节点、待审批人、实际等待时长及审批链接。只有实际领取成功的任务进入清单。按含标题和群 @ 前缀的 `msgParam` UTF-8 字节数计算，超出 15,000 字节时按完整条目分段。依据 [钉钉群消息接口](https://open.dingtalk.com/document/development/the-robot-sends-a-group-message.md)。
+
+通知语言默认取当前审批人成功快照姓名。判断时只去掉配对括号里的别名，保留括号外的全部文字。主姓名的字母全部为拉丁字母时用西语，中文、混合文字或缺少有效快照姓名时用简体中文。语言选择是姓名规则，项目目前没有保存钉钉客户端语言偏好。个别账号可用 `APPROVAL_TIMEOUT_ES_USER_IDS` 或 `APPROVAL_TIMEOUT_ZH_USER_IDS` 覆盖，多个账号以逗号隔开，两者同时命中时优先中文。群里每项按对应账号语言展示，两种语言合在同一条消息并显示双语标题。[消息模板](../../../src/jobs/approval-timeout-message.ts)
+
+群发送使用 `/v1.0/robot/groupMessages/send`。每条消息收集对应任务的审批人 userId，去空去重后设置顶层 `atUserIds`、`isAtAll=false`，并在正文添加 `@userId` 标记。缺少审批人的任务仍可列入群汇总。没有可 @ 人员时发送普通群消息。@ 参数依据 [发送方 SDK](https://github.com/DingTalk-Real-AI/dingtalk-channel-sdk-python/blob/main/src/dingtalk_channel_sdk/send.py) 和 [CLI 群 @ 规范](https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli/blob/main/skills/mono/references/products/chat.md#机器人-指定人发群消息)。[选择群会话](https://open.dingtalk.com/tools/explorer/jsapi?id=10303) 返回 `openConversationId`。机器人入群、发送权限及实际群内 @ 效果需部署后联调。
 
 超时监控要求配置 `DINGTALK_CORP_ID`，SQL 和发送前均约束该企业；部署者须确保机器人凭据属于该企业。查询仅接受未删除、实例/任务 `RUNNING` 且任务 `end_time` 为空的记录；最新实例原始 `tasks` 数组若已移除或结束旧任务，也会跳过。任务重进的结束时间修正规则见 [审批归档](../approval-ingestion/README.md#功能与规则)，不执行历史批量修复；既有异常记录需后续详情刷新满足条件后修正。重进以任务 ID 和开始时间形成新的去重阶段，哈希长度适配现有 `VARCHAR(64)`；群以 `group:sha256(openConversationId)` 存入现有接收人键，避免扩表。停止提醒依赖审批事件/状态核对写入本地的及时性，不代表实时查询钉钉状态。
 
@@ -43,12 +47,18 @@ forecastProcess 提交当前 formComponentValues，优先按 workflowForecastNod
 
 ## 投递、审计与失败
 
-[claimAlertDelivery](../../../src/db/queries/alert-notification.ts) 原子 INSERT/冲突更新领取；默认 sent 不再领取，failed 或超过 15 分钟 sending 可再次领取。仅超时提醒传入 1440 分钟重投间隔，允许上次 `sent_at` 满 24 小时后重新领取，保留最近发送时间并累加尝试次数；预算和空节点仍为一次性规则。个人和各群独立记录，单渠道失败不阻断其他目标或重发已成功渠道。[机器人](../../../src/dingtalk/alert-robot.ts) 使用独立应用 Token，个人通过 oToMessages/batchSend 发送 Markdown，并检查 invalidStaffIdList / flowControlledStaffIdList；群要求响应包含 processQueryKey。Token 获取和发送请求均设置 10 秒超时。
+[投递查询](../../../src/db/queries/alert-notification.ts) 以原子 INSERT/冲突更新领取任务。超时每个个人或群目标一次批量领取，沿用原有任务级唯一键。failed 或超过 15 分钟的 sending 可再次领取。超时上次成功 `sent_at` 满 24 小时可重新领取，预算和空节点按一次性规则领取。调度器在同一进程内避免扫描重叠。
+
+每个分段在发送前按企业和任务 ID 重新读取本地审批。已结束或已删除的任务从清单移除。仍到期的转交任务按新账号重分组，已有待发清单时合并进去。群消息按复核到的当前人员重新计算 @ 和语言。本轮补发准备时若任务再次变化，交由下一轮扫描处理。
+
+分段发出前按 `attempt_count`、状态和有效期校验并续租，已过期或被其他进程重新领取的任务从正文及 @ 中移除。每条汇总发送后批量记录其包含的任务，较早尝试的结果不能覆盖新尝试。每条任务记录仍有自己的状态和最近成功时间。同一条汇总消息的记录共享 `payload.batchId`。失败消息内的任务随该目标在后续扫描重试。成功的目标按各自的 `sent_at` 计算下次提醒。日志的发送数按实际汇总消息计数。
+
+[机器人](../../../src/dingtalk/alert-robot.ts) 使用独立应用 Token。个人通过 oToMessages/batchSend 发送 Markdown，并检查 invalidStaffIdList / flowControlledStaffIdList。群要求响应包含 processQueryKey。Token 获取和发送请求均设置 10 秒超时。
 
 先外部发送后标 sent，不是 exactly-once；发送已成功而落库失败可能重发。空节点/预算没有独立周期补偿队列，之后能否再尝试依赖事件或调用再次触发；日志成功不能证明旁路通知均已送达。
 
-数据库结构：[ding_alert_notification 迁移](../../../migrations/20260915000000_create_ding_alert_notification.cjs)，本次无需结构迁移。消息集中在 [超时通知模板](../../../src/jobs/approval-timeout-message.ts)，目前正式支持简体中文并预留 locale 扩展；源名称原样展示。
+汇总和语言选择沿用现有投递表结构，部署无需新增迁移。[ding_alert_notification 迁移](../../../migrations/20260915000000_create_ding_alert_notification.cjs)
 
 验证：`npm run lint` 及超时、机器人、空节点、预算、调度、实例/任务规范化 7 个文件的 61 项单元测试通过（2026-11-10）。测试模拟数据库与网络，覆盖首次阈值、长期超时、渠道重试、并行审批人、群 @ 参数与正文标记、最新快照缺失人员且历史列仍有人员、转交/结束快照、缺失时间、企业过滤和旧预警兼容。
 
-新增 [PostgreSQL 集成回归](../../../src/db/approval-timeout.integration.test.ts) 8 项用例，经过真实 normalizeTasks → upsertTask → 候选查询 → 模拟通知，验证新轮次清理旧结束时间、开始时间恰等于旧结束时间、已保存新开始时间的异常行恢复、普通缺字段/旧开始时间保留结束历史、显式结束时间保留，以及历史人员列不会触发误发。仅显式提供获准的 `APPROVAL_TIMEOUT_TEST_DATABASE_URL` 才启用，要求 loopback 和 `approval_timeout_test` 或 `approval_timeout_test_*` 库名，使用会话临时表，不运行迁移或访问 public 表。本次未获准隔离库，8 项均跳过；真实 PostgreSQL 重投/并发、钉钉权限与送达、生产状态同步仍待联调。
+[PostgreSQL 集成回归](../../../src/db/approval-timeout.integration.test.ts) 覆盖任务重进、结束时间、当前审批人姓名、历史姓名错配、企业隔离、批量回写、24 小时重投、过期续租和旧尝试保护。仅显式提供获准的 `APPROVAL_TIMEOUT_TEST_DATABASE_URL` 才启用，要求 loopback 和 `approval_timeout_test` 或 `approval_timeout_test_*` 库名，使用会话临时表。类型检查和 286 项离线测试通过，包含前置、中间、嵌套及未闭合括号，以及转交后只有旧归档姓名的回归。姓名批量查询在本地 PostgreSQL 以只读方式验证。批量回写、领取过期和转交复核 SQL 此前用独立内存 PostgreSQL 验证，发送使用模拟机器人。13 项超时连接式 PostgreSQL 用例因缺少获准隔离库而跳过，生产送达仍待联调。

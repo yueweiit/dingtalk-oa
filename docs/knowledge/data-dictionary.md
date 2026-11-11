@@ -30,6 +30,7 @@
 | 财务 pending_ids / next_token / page_loaded | JSONB / JSONB / BOOLEAN | 持久分页进度；成功写入一个详情后才移除队首 ID |
 | 装箱 content_sha256 / capture_consistency | CHAR(64) / VARCHAR | 完整快照 JSON 摘要；single_range 或 multi_range，不保证跨块同一时点 |
 | 预警 alert_type / alert_phase / recipient_user_id | VARCHAR | 按实例、类型、阶段、接收人去重；超时为 daily:hash(taskId, startedAt)，个人用任务审批人 ID，群用 group:sha256(openConversationId)，同一投递记录成功满 24 小时可重投；预算阶段包含等级、部门和月份，详见 [预警](../modules/alerts/README.md) |
+| 超时预警 payload.batchId | JSONB 中的字符串 | 最近一次汇总投递尝试的标识。同一条消息包含的各任务记录共享该值，任务仍独立记状态及最近成功时间 |
 
 依据：[基础模型](../../src/db/types.ts)、[规范化](../../src/normalize/instance-normalizer.ts)、[任务规范化](../../src/normalize/task-normalizer.ts)、[用户摘要](../../src/normalize/user-snapshot.ts)、[物流迁移](../../migrations/20260909000000_logistics_settlement_archive.cjs)、[财务范围](../../migrations/20260910010000_financial_source_scope.cjs)、[财务投影](../../migrations/20260910020000_financial_source_projection.cjs)、[装箱迁移](../../migrations/20260907000000_create_packing_sheet_cache.cjs)、[预警迁移](../../migrations/20260915000000_create_ding_alert_notification.cjs)。
 

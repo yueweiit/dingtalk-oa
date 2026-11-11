@@ -18,7 +18,7 @@
 
 新增 [审批读取 HTTP API](../modules/approval-read-api/README.md) 的错误只返回稳定 code，由调用方翻译，不新增自然语言错误依赖；模板名、表单名和 rawPayload 按源语言保存。外层数据库时间统一 UTC ISO 8601 并保留微秒，原始 JSON 内的时间不改写。
 
-审批超时通知（2026-11-10）已在 [approval-timeout-message.ts](../../src/jobs/approval-timeout-message.ts) 集中模板并预留 locale 参数，正式支持简体中文；时长数字使用 Intl.NumberFormat，流程/节点/人员源名称不翻译。群接口新增错误使用稳定 ALERT_ROBOT_* 编码。这是局部实现，未引入翻译依赖，也不代表其他通知或整项目已有统一语言切换。
+审批超时通知支持简体中文和西班牙语，默认按当前审批人的用户快照主姓名选择。运维可按钉钉账号覆盖个别用户。混合语言的群汇总使用双语标题，每项沿用对应审批人的语言。时长数字使用 Intl.NumberFormat，流程、节点和人员名称保留源语言。具体模板和配置见 [超时通知](../modules/alerts/README.md#超时)。
 
 ## 后续新增功能约定（建议，尚未实现）
 

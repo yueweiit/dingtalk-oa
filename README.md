@@ -220,7 +220,7 @@ npx tsx scripts/backfill.ts --help
 
 预算预警、审批超时和空审批节点共用独立的企业内部机器人，与其他业务机器人隔离。机器人凭据、固定接收人及可选通知群通过环境变量配置，不得将实际凭据提交到 Git；超时个人接收人取当前任务审批人。所有定时任务使用 `Asia/Shanghai` 时区。
 
-- 审批超时：当前任务满 72 小时后首次提醒，直接发给任务的待审批人；可通过 `APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS` 配置群 `openConversationId` 同步发送群消息并 @ 当前任务对应的审批人。每个任务、接收人/群独立去重，上次成功发送满 24 小时才再次发送；失败渠道在后续扫描重试，不补发停机期间积压的多天提醒。仅扫描 `DINGTALK_CORP_ID` 对应企业、配置流程中的未结束任务；完成/撤销/转交后按本地最新状态停止旧任务提醒。详见 [统一预警](docs/modules/alerts/README.md)。
+- 审批超时：当前任务满 72 小时后首次提醒。同一轮扫描中，发给同一审批人或同一个群的到期任务合并为一条清单，正文过长时按完整任务分段。可通过 `APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS` 配置群 `openConversationId`，群里对当前审批人去重后 @。每个任务和投递目标仍独立记录成功时间，满 24 小时且仍待审时再次提醒。失败渠道在后续扫描重试。详见 [统一预警](docs/modules/alerts/README.md)。
 - 预算预警：普通表单按稳定组件 ID 提取月份、预算类型、服务主体和申请金额；部门拆分表单按配置的表格、部门列和金额列组件 ID 逐行提取，并先合并同部门金额，再逐部门调用预算系统内部汇总接口。每个部门分别在预计使用率达到 90% 或超预算时提醒；预算为 0 或无预算的部门不提醒。部门负责人 userId 映射完成前，消息仍发送给固定预警接收人。
 - 空审批节点：审批提交后调用钉钉流程预测接口，检查按当前表单选项得到的实际后续路径。普通审批节点没有审批人时提醒；由发起人后续自选审批人的节点不判为空节点。
 - 动态流程：预测请求使用本次提交的表单值，因此不同选项产生的分支会按实际路径检查，而不是只检查模板默认路径。
@@ -378,6 +378,8 @@ dingtalk-oa/
 | DINGTALK_ALERT_CLIENT_SECRET | 预警启用时是 | - | 预警机器人客户端密钥，仅保存在 `.env` |
 | DINGTALK_ALERT_RECIPIENT_USER_IDS | 预算/空节点预警时是 | - | 固定通知接收人 userId；审批超时不使用此配置 |
 | APPROVAL_TIMEOUT_PROCESS_CODES | 否 | - | 启用超时提醒的流程码列表 |
+| APPROVAL_TIMEOUT_ES_USER_IDS | 否 | 空 | 强制使用西语的钉钉 userId，逗号分隔。未覆盖的账号按快照主姓名选语言 |
+| APPROVAL_TIMEOUT_ZH_USER_IDS | 否 | 空 | 强制使用中文的钉钉 userId，逗号分隔。同一账号在两份名单中时优先中文 |
 | APPROVAL_TIMEOUT_GROUP_CONVERSATION_IDS | 否 | 空 | 逗号分隔的企业群 openConversationId；配置后同步发群，不配置只发个人 |
 | APPROVAL_TIMEOUT_MONITOR_CRON | 否 | */30 * * * * | 超时扫描周期，正式环境每 30 分钟 |
 | APPROVAL_TIMEOUT_MINUTES | 否 | 4320 | 首次提醒阈值，单位分钟；既有环境显式配置值需同步调整为 4320 |

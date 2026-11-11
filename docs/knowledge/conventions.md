@@ -31,7 +31,7 @@
 
 [物流集成测试](../../src/db/settlement-contract.integration.test.ts) 仅在 SETTLEMENT_TEST_DATABASE_URL 存在时启用，限制 loopback 且数据库名 settlement_test*；[财务集成测试](../../src/db/financial-contract.integration.test.ts) 要求 FINANCIAL_TEST_DATABASE_URL 和 settlement_test_financial*。它们会建角色、迁移及 TRUNCATE，只能使用获准的一次性隔离数据库，不能共用业务库。构建产物不等于已部署。
 
-[超时提醒集成测试](../../src/db/approval-timeout.integration.test.ts) 仅在显式提供获准的 APPROVAL_TIMEOUT_TEST_DATABASE_URL 时启用；限定 loopback 及 approval_timeout_test / approval_timeout_test_* 库名，拒绝连接参数覆盖目标地址。只创建会话临时表，重置操作显式限定 pg_temp，不运行迁移或修改 public 表。本次 8 项因没有获准隔离库而跳过，不可把单元测试通过写成真实 PostgreSQL 已验证。
+[超时提醒集成测试](../../src/db/approval-timeout.integration.test.ts) 仅在显式提供获准的 APPROVAL_TIMEOUT_TEST_DATABASE_URL 时启用，限定 loopback 及 approval_timeout_test / approval_timeout_test_* 库名，并拒绝连接参数覆盖目标地址。审批实例、任务和投递记录均使用会话临时表，重置限定 pg_temp。用例覆盖任务重进和汇总投递，验证状态见 [超时通知](../modules/alerts/README.md#超时)。
 
 [用户快照集成测试](../../src/db/user-snapshot.integration.test.ts) 需要显式获准的 USER_SNAPSHOT_TEST_DATABASE_URL，限定 loopback 和 user_snapshot_test / user_snapshot_test_*，拒绝连接参数覆盖。在测试自建随机 schema 中执行两阶段迁移、区间整理、并发读取/写入和回滚用例；另验证旧失败清理的完整 JSON 归档、成功历史保留、错配回滚、外键/触发器/规则拦截及后续正常写入。结束时仅删除该 schema，禁止使用业务库。第二阶段校验必须在第一阶段提交后执行，不能用外层事务把两阶段重新包在一起；独立清理也须保留单阶段事务。未提供获准库时应跳过；[离线迁移检查](../../src/db/user-snapshot-migration.test.ts) 生成 SQL 并用模拟数据库检验实际迁移器的事务边界和清理安全契约，不连接真实数据库。
 
