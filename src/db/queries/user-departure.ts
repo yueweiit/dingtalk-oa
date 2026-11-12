@@ -131,7 +131,7 @@ export async function backfillUserDepartures(corpId: string, options: {
     const lastId = await (dryRun ? withClient : withTransaction)(async client => {
       const { rows } = await client.query<DepartureSource>(
         `SELECT corp_id, process_instance_id, process_code, status, result, deleted_at,
-                originator_user_id, originator_user_name, raw_payload
+                originator_user_id, raw_payload
          FROM ding_approval_instance
          WHERE corp_id = $1 AND process_code = ANY($2::varchar[]) AND deleted_at IS NULL
            AND process_instance_id > $3 AND ($4::varchar IS NULL OR process_instance_id = $4)

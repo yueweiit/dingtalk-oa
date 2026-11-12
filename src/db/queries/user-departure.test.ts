@@ -20,7 +20,7 @@ const detail = {
 };
 const mexican: DepartureSource = {
   corp_id: 'corp-a', process_instance_id: 'departure-a', process_code: 'PROC-7DB16FD2-70D6-41AE-9C5D-AE3DFF53A957',
-  status: 'COMPLETED', result: 'agree', deleted_at: null, originator_user_id: 'old-event-id', originator_user_name: null,
+  status: 'COMPLETED', result: 'agree', deleted_at: null, originator_user_id: 'old-event-id',
   raw_payload: detail,
 };
 const confirmedEmployee = {

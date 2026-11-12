@@ -10,7 +10,7 @@ const cnDetail = { status: 'COMPLETED', result: 'agree', originatorUserId: '001'
 const chinese: DepartureSource = {
   corp_id: 'corp-a', process_instance_id: 'approval-a', process_code: 'PROC-A917A16C-ADED-42A0-830A-DF20A5880948',
   status: 'COMPLETED', result: 'agree', deleted_at: null,
-  originator_user_id: '001', originator_user_name: '归档姓名', raw_payload: cnDetail,
+  originator_user_id: '001', raw_payload: cnDetail,
 };
 
 describe('departure approval normalization', () => {
@@ -31,6 +31,16 @@ describe('departure approval normalization', () => {
       .toMatchObject({ submitterId: null, submitterIds: ['other', '001'] });
     expect(departureFromApproval({ ...chinese, raw_payload: { ...cnDetail, originator: { userId: '001' }, originatorId: ' 001 ' } }))
       .toMatchObject({ submitterId: '001', submitterIds: ['001'] });
+  });
+
+  it('uses the original submitter name when available and never copies an already enriched name into a departure', () => {
+    const archived = {
+      ...chinese, originator_user_name: '另一张离职单补齐的姓名', originator_user_name_source_instance_id: 'other-departure',
+      raw_payload: { ...cnDetail, formComponentValues: [cnFields[2]] },
+    };
+    expect(departureFromApproval(archived)).toMatchObject({ employeeName: null });
+    expect(departureFromApproval({ ...archived, raw_payload: { ...archived.raw_payload, originatorUserName: '原始发起人姓名' } }))
+      .toMatchObject({ employeeName: '原始发起人姓名' });
   });
 
   it('extracts the Mexican employee and actual date separately from the submitting account', () => {

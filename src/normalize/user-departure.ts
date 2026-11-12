@@ -14,7 +14,7 @@ export const departureProcessCodes = Object.keys(templates);
 
 export type DepartureSource = Pick<DingApprovalInstance,
   'corp_id' | 'process_instance_id' | 'process_code' | 'status' | 'result' | 'deleted_at' |
-  'originator_user_id' | 'originator_user_name' | 'raw_payload'>;
+  'originator_user_id' | 'raw_payload'>;
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -46,11 +46,15 @@ export function departureFromApproval(source: DepartureSource) {
   const raw = object(source.raw_payload);
   const approvedDetail = approved(raw?.status, raw?.result);
   const components = raw?.formComponentValues;
-  const submitterIds = [...new Set([object(raw?.originator)?.userId, raw?.originatorUserId, raw?.originatorId]
+  const originator = object(raw?.originator);
+  const submitterIds = [...new Set([originator?.userId, raw?.originatorUserId, raw?.originatorId]
     .map(value => firstText(value)).filter((id): id is string => id !== null && /^\S{1,128}$/.test(id)))];
   const submitterId = submitterIds.length === 1 ? submitterIds[0] : null;
-  const originatorName = template.region === 'CN' && submitterId && submitterId === source.originator_user_id
-    ? firstText(source.originator_user_name) : null;
+  // The archived name may have been filled from another departure. Use names from this approval only.
+  const originatorName = template.region === 'CN' && submitterId ? firstText(
+    firstText(originator?.userId) === submitterId ? originator?.name : null,
+    firstText(raw?.originatorUserId, raw?.originatorId) === submitterId ? raw?.originatorUserName : null,
+  ) : null;
 
   return {
     region: template.region,
