@@ -25,6 +25,7 @@ export interface DingApprovalInstance {
   result: string | null;
   originator_user_id: string | null;
   originator_user_name: string | null;
+  originator_user_name_source_instance_id?: string | null;
   originator_dept_id: string | null;
   originator_dept_name: string | null;
   create_time: Date | null;
@@ -50,6 +51,7 @@ export interface DingApprovalTask {
   result: string | null;
   approver_user_id: string | null;
   approver_user_name: string | null;
+  approver_user_name_source_instance_id?: string | null;
   approver_dept_id: string | null;
   approver_dept_name: string | null;
   start_time: Date | null;

@@ -49,6 +49,9 @@ export async function upsertInstance(params: {
         originator_user_name = CASE WHEN EXCLUDED.originator_user_id IS NOT NULL
           AND EXCLUDED.originator_user_id IS DISTINCT FROM ding_approval_instance.originator_user_id
           THEN EXCLUDED.originator_user_name ELSE COALESCE(EXCLUDED.originator_user_name, ding_approval_instance.originator_user_name) END,
+        originator_user_name_source_instance_id = CASE WHEN EXCLUDED.originator_user_name IS NOT NULL
+          OR (EXCLUDED.originator_user_id IS NOT NULL AND EXCLUDED.originator_user_id IS DISTINCT FROM ding_approval_instance.originator_user_id)
+          THEN NULL ELSE ding_approval_instance.originator_user_name_source_instance_id END,
         originator_dept_id = CASE WHEN EXCLUDED.originator_user_id IS NOT NULL
           AND EXCLUDED.originator_user_id IS DISTINCT FROM ding_approval_instance.originator_user_id
           THEN EXCLUDED.originator_dept_id ELSE COALESCE(EXCLUDED.originator_dept_id, ding_approval_instance.originator_dept_id) END,

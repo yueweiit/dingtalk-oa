@@ -12,11 +12,12 @@ function statement(kind: 'instance' | 'task', dryRun: boolean): string {
   const table = instance ? 'ding_approval_instance' : 'ding_approval_task';
   const prefix = instance ? 'originator' : 'approver';
   const userId = `${prefix}_user_id`, userName = `${prefix}_user_name`;
+  const nameSource = `${userName}_source_instance_id`;
   const deptId = `${prefix}_dept_id`, deptName = `${prefix}_dept_name`;
   const time = instance ? 'create_time' : 'start_time';
-  const rawUserId = instance
-    ? `COALESCE(${text("s.raw_payload#>>'{originator,userId}'")}, ${text("s.raw_payload->>'originatorUserId'")}, ${text("s.raw_payload->>'originatorId'")})`
-    : text("s.raw_payload->>'userId'");
+  const originatorIds = ["s.raw_payload#>>'{originator,userId}'", "s.raw_payload->>'originatorUserId'", "s.raw_payload->>'originatorId'"].map(text);
+  const rawUserId = instance ? `COALESCE(${originatorIds.join(', ')})` : text("s.raw_payload->>'userId'");
+  const originatorIdsAgree = originatorIds.map(id => `(${id} IS NULL OR ${id}=${rawUserId})`).join(' AND ');
   const rootUserId = `COALESCE(${text("s.raw_payload->>'originatorUserId'")}, ${text("s.raw_payload->>'originatorId'")})`;
   const sameRootUser = `(${rootUserId} IS NULL OR ${rootUserId}=${rawUserId})`;
   const resolvedUserId = `COALESCE(${text(`s.${userId}`)}, ${rawUserId})`;
@@ -35,16 +36,19 @@ function statement(kind: 'instance' | 'task', dryRun: boolean): string {
       AND (${text("s.raw_payload->>'originatorDeptId'")} IS NULL OR ${text("s.raw_payload->>'originatorDeptId'")}=${rawDeptId})
       THEN ${text("s.raw_payload->>'originatorDeptName'")} END)`
     : text("s.raw_payload->>'deptName'");
-  const fields = [userId, userName, deptId, deptName, ...(!instance ? ['node_name'] : [])];
+  const fields = [userId, userName, nameSource, deptId, deptName, ...(!instance ? ['node_name'] : [])];
   const sourceMatchesUser = instance ? '(d.raw_user_id IS NULL OR d.raw_user_id=d.user_id)' : 'd.raw_user_id=d.user_id';
   const tuple = (alias: string) => `ROW(${fields.map(field => `${alias}.${field}`).join(', ')})`;
   const original = `ROW(${fields.map(field => `c.stored_${field}`).join(', ')}, c.raw_payload, c.occurred_at)`;
   const current = `ROW(${fields.map(field => `t.${field}`).join(', ')}, t.raw_payload, t.${time})`;
+  const sourceReady = dryRun ? 'true' : `(p.source_process_instance_id IS NULL
+    OR lock_departure_directory_name(d.corp_id, d.user_id, p.source_process_instance_id, p.name))`;
   return `WITH base AS (
     SELECT s.id, s.corp_id, s.process_instance_id, s.raw_payload, s.${time} AS occurred_at,
       ${fields.map(field => `s.${field} AS stored_${field}`).join(', ')},
       ${profileUserId} AS user_id,
       ${rawUserId} AS raw_user_id, ${rawDeptId} AS raw_dept_id,
+      ${instance ? `(${originatorIdsAgree})` : 'true'} AS raw_user_ids_agree,
       ${rawUserName} AS raw_user_name, ${rawDeptName} AS raw_dept_name,
       COALESCE(${text(`s.${deptId}`)}, CASE WHEN ${rawUserId} IS NULL
         OR ${rawUserId}=COALESCE(${text(`s.${userId}`)}, ${rawUserId}) THEN ${rawDeptId} END) AS approval_dept_id
@@ -52,34 +56,44 @@ function statement(kind: 'instance' | 'task', dryRun: boolean): string {
       ${instance ? 'AND s.deleted_at IS NULL' : `AND EXISTS (SELECT 1 FROM ding_approval_instance i
         WHERE i.corp_id=s.corp_id AND i.process_instance_id=s.process_instance_id AND i.deleted_at IS NULL)`}
   ), profiles AS (
-    SELECT b.*, h.name AS historical_name, u.name AS current_name,
+    SELECT b.*, h.name AS historical_name,
       ${instance ? 'b.approval_dept_id' : 'CASE WHEN b.user_id IS NOT NULL THEN b.approval_dept_id END'} AS resolved_dept_id
     FROM base b
     LEFT JOIN LATERAL (
-      SELECT p.name
+      SELECT ${name('p.name')} AS name
       FROM ding_user_snapshot p
       WHERE p.corp_id=b.corp_id AND p.user_id=b.user_id AND p.fetch_status='success'
+        AND ${name('p.name')} IS NOT NULL
+        AND b.raw_user_ids_agree AND (b.raw_user_id IS NULL OR b.raw_user_id=b.user_id)
         AND b.occurred_at IS NOT NULL AND p.valid_from<=b.occurred_at
         AND (p.valid_to IS NULL OR b.occurred_at<p.valid_to)
       ORDER BY p.valid_from DESC,p.id DESC LIMIT 1
     ) h ON true
-    LEFT JOIN LATERAL (
-      SELECT p.name FROM ding_user_snapshot p
-      WHERE p.corp_id=b.corp_id AND p.user_id=b.user_id AND p.is_current=true AND p.fetch_status='success'
-      ORDER BY p.valid_from DESC,p.id DESC LIMIT 1
-    ) u ON true
   ), candidates AS (
     SELECT d.*, COALESCE(${kept(`d.stored_${userId}`)}, d.user_id) AS ${userId},
-      COALESCE(${kept(`d.stored_${userName}`)},
-        CASE WHEN ${sourceMatchesUser} THEN d.raw_user_name END,
-        ${name('d.historical_name')}, ${name('d.current_name')}) AS ${userName},
+      COALESCE(n.known_name, CASE WHEN u.source_ready THEN u.name WHEN NOT u.source_ready THEN d.stored_${userName} END,
+        CASE WHEN d.stored_${nameSource} IS NULL THEN ${kept(`d.stored_${userName}`)} END) AS ${userName},
+      CASE WHEN u.source_ready THEN u.source_process_instance_id WHEN NOT u.source_ready THEN d.stored_${nameSource} END AS ${nameSource},
       COALESCE(${kept(`d.stored_${deptId}`)}, d.resolved_dept_id) AS ${deptId},
       COALESCE(${kept(`d.stored_${deptName}`)},
         CASE WHEN (${sourceMatchesUser})
           AND (d.raw_dept_id IS NULL OR d.raw_dept_id=d.resolved_dept_id) THEN d.raw_dept_name END,
         CASE WHEN length(org.name)<=256 THEN ${text('org.name')} END) AS ${deptName}
       ${!instance ? `, COALESCE(${kept('d.stored_node_name')}, ${text("d.raw_payload->>'nodeName'")}, ${text("d.raw_payload->>'taskGroupName'")}) AS node_name` : ''}
-    FROM profiles d LEFT JOIN ding_department_tree org
+    FROM profiles d CROSS JOIN LATERAL (
+      SELECT COALESCE(
+        CASE WHEN d.stored_${nameSource} IS NULL AND ${name(`d.stored_${userName}`)} IS NOT NULL THEN d.stored_${userName} END,
+        CASE WHEN d.raw_user_ids_agree AND ${sourceMatchesUser} THEN d.raw_user_name END,
+        d.historical_name) AS known_name
+    ) n
+    LEFT JOIN LATERAL (
+      SELECT p.name, p.source_process_instance_id, ${sourceReady} AS source_ready
+      FROM ding_user_directory p
+      WHERE n.known_name IS NULL AND p.corp_id=d.corp_id AND p.user_id=d.user_id
+        AND d.raw_user_ids_agree AND (d.raw_user_id IS NULL OR d.raw_user_id=d.user_id)
+      LIMIT 1
+    ) u ON true
+    LEFT JOIN ding_department_tree org
       ON org.corp_id=d.corp_id AND org.dept_id=d.resolved_dept_id AND org.parent_dept_id IS NOT NULL
   ) ${dryRun
     ? `SELECT count(*)::int AS n FROM candidates c WHERE ROW(${fields.map(field => `c.stored_${field}`).join(', ')}) IS DISTINCT FROM ${tuple('c')}`

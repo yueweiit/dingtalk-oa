@@ -43,6 +43,9 @@ export async function upsertTask(params: {
         approver_user_name = CASE WHEN EXCLUDED.approver_user_id IS NOT NULL
           AND EXCLUDED.approver_user_id IS DISTINCT FROM ding_approval_task.approver_user_id
           THEN EXCLUDED.approver_user_name ELSE COALESCE(EXCLUDED.approver_user_name, ding_approval_task.approver_user_name) END,
+        approver_user_name_source_instance_id = CASE WHEN EXCLUDED.approver_user_name IS NOT NULL
+          OR (EXCLUDED.approver_user_id IS NOT NULL AND EXCLUDED.approver_user_id IS DISTINCT FROM ding_approval_task.approver_user_id)
+          THEN NULL ELSE ding_approval_task.approver_user_name_source_instance_id END,
         approver_dept_id = CASE WHEN EXCLUDED.approver_user_id IS NOT NULL
           AND EXCLUDED.approver_user_id IS DISTINCT FROM ding_approval_task.approver_user_id
           THEN EXCLUDED.approver_dept_id ELSE COALESCE(EXCLUDED.approver_dept_id, ding_approval_task.approver_dept_id) END,
