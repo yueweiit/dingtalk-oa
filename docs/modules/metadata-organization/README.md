@@ -66,7 +66,7 @@ WHERE fetch_status IS DISTINCT FROM 'success';
 
 `ding_user_departure` 按企业和来源实例保存已通过的离职申请、表单姓名、当地离职日期、关联员工 ID 及确认方式。历史回填和标准审批归档共用[同一写入入口](../../../src/db/queries/user-departure.ts)，按[固定流程码和组件 ID](../../../src/normalize/user-departure.ts) 处理两种表单。
 
-- 中国「离职」由本人发起，用原始审批详情的发起人 ID 和表单的「员工名称」「批准离职日期」。缺少发起人 ID 或详情中的发起人 ID 互相冲突时，保留待核对。
+- 中国「离职」由本人发起，用原始审批详情的发起人 ID 和表单的「员工名称」「批准离职日期」。表单缺姓名时，可用原始详情中同一发起人的姓名。缺少发起人 ID 或详情中的发起人 ID 互相冲突时，保留待核对。
 - 墨西哥「离职」由 HR 或主管代填，用「员工名称」「钉钉名字」「实际离职日期」。两个不同姓名在同企业历史成功快照中只指向同一个非代提账号时，记录 `candidate_user_id` 供 HR 核对。HR 确认后写入实际员工 ID。重跑保留已确认姓名和 ID，字段暂缺、空白和大小写差异保持原确认。后续同一姓名字段出现实质冲突时，保留原确认并标记待复核，重新人工确认后才能生效。
 - 离职日期和审批通过结果必须来自同一份原始详情。当前详情日期缺失或无效时保留待确认。来源仍为未删除且通过的审批、员工 ID 已确认且无待复核标记、当地离职日期已到时，审批补取和手工同步都跳过用户详情刷新。中国按 `Asia/Shanghai`，墨西哥按 `America/Mexico_City`。历史成功快照及错误历史保留。此流程当前只依据离职审批，无复职数据来源。
 - 来源审批软删除后，离职记录保留供追溯并停止生效。外键限制硬删除仍有关联离职记录的审批实例。
@@ -88,11 +88,22 @@ npm run backfill:departures -- --corp-id <corpId> --instance-id <instanceId> --c
 
 查看待核对单据时，可在所属企业范围内查询 `ding_user_departure` 中 `user_id IS NULL OR identity_review_required OR departed_on IS NULL` 的记录，通过 `source_process_instance_id` 核对原审批。人工确认命令仅接受原始详情明确通过且包含员工姓名信息的单条墨西哥离职审批。
 
+## 人员名录
+
+在 Navicat 的视图中打开 `public.ding_user_directory`，按 `corp_id` 和 `user_id` 查询。名录每企业每账号一行，优先使用当前成功快照中的有效姓名，再使用其他历史成功姓名。成功快照缺姓名时，从仍有效、身份已确认且无需复核的离职记录取姓名，有多条时按离职日期、更新时间及来源实例排序。`name_source` 为 `snapshot` 或 `departure_approval`，离职来源用 `source_process_instance_id` 追溯。候选 ID 和待复核身份不参与。离职证据失效时，按企业及来源实例撤回已经写入审批的兜底姓名。部门归属继续使用审批证据。
+
+先应用 [人员名录迁移](../../../migrations/20261111000001_create_ding_user_directory.cjs)，再启动新版服务或执行历史审批回填。名录访问使用有权限的数据库角色，审批 HTTP API 继续使用已有返回字段。
+
+```bash
+npm run migrate:up -- 20261111000001_create_ding_user_directory --no-check-order --dry-run
+npm run migrate:up -- 20261111000001_create_ding_user_directory --no-check-order
+```
+
 ## 审批元数据历史回填
 
 [同步脚本](../../../scripts/sync-metadata.ts) 包括根部门的直接成员；用户资料 hash 未变化也会在本轮末尾执行一次分批审批空值补全，不再因 continue 跳过姓名回填，也不再用 COALESCE 保留空字符串。没有发现新用户时，仍可使用已保存的成功资料补齐审批空值。用户快照新版本计数与审批回填计数分开输出；手工同步仍会访问钉钉、写用户/部门及审批数据，不能当作只读检查。
 
-单独处理历史审批时可使用 [本地回填入口](../../../src/cli/backfill-approval-metadata.ts)，只读取已有审批 JSON、成功用户快照和部门字典，不调用钉钉、不发送消息、不启动调度。默认只预览，新增 `--apply` 才写入；缺企业、批次不在 1–200 或预览/执行参数冲突时拒绝。
+单独处理历史审批时可使用 [本地回填入口](../../../src/cli/backfill-approval-metadata.ts)，数据来自已有审批 JSON、成功用户快照、人员名录和部门字典。命令默认预览，显式 `--apply` 才写入审批实例或节点；缺企业、批次不在 1–200 或预览/执行参数冲突时拒绝。
 
 ```bash
 # 默认预览；corp-id 也可由现有 DINGTALK_CORP_ID 提供
@@ -101,9 +112,9 @@ npm run backfill:metadata -- --corp-id <corpId> --instance-id <instanceId>
 npm run backfill:metadata -- --corp-id <corpId> --instance-id <instanceId> --apply
 ```
 
-JSON 输出 dryRun、scanned、instances、tasks，后两项在预览时表示预计发生变化的记录数，在执行时表示实际修改数；不是字段数或仍缺字段的记录数。预览不承诺随后执行的计数相同。按稳定实例 ID 游标分批，无证据可补的行也推进游标；执行时每批独立事务，后续批次失败不撤销此前已提交批次，可修正后幂等重跑。原始字段、既有非空值和删除标记保留，无字段变化则不推进 updated_at；真正补齐的实例字段会按现有触发器推进下游增量水位。源字段与历史部门证据规则复用 [审批归档契约](../approval-ingestion/README.md#人员部门和节点空值补全)，不允许用事后当前部门倒填历史归属。
+JSON 输出 dryRun、scanned、instances、tasks，后两项在预览时表示预计发生变化的记录数，在执行时表示实际修改数。按稳定实例 ID 游标分批，无证据可补的行也推进游标。每批独立事务，后续批次失败可修正后重跑。已有有效原始字段和删除标记保留，离职兜底的姓名随来源有效性重新核对。有字段变化时按现有触发器推进下游增量水位。源字段与历史部门证据规则复用 [审批归档契约](../approval-ingestion/README.md#人员部门和节点空值补全)。
 
-此功能不需要新增数据库迁移。更新应用只影响后续保存/刷新及用户补取，现有历史 NULL 不会因重启自动全部消失；生产批量回填需明确授权及维护安排。真实 PostgreSQL 执行和生产数据修复尚待验证。
+离职姓名兜底依赖人员名录迁移。已有审批的空姓名通过回填或实例重新归档补齐；来源不再有效时，同一回填可重新核对之前采用离职姓名的字段。生产批量回填需明确授权及维护安排。
 
 2026-11-11 已通过项目及手工同步脚本的类型检查。全量测试中 270 项离线用例通过，覆盖字段别名、空白后备值、同用户请求合并、审批人补取、根部门成员、资料未变化时的回填、默认预览及游标推进。因缺少获准的隔离库，129 项 PostgreSQL 集成测试跳过，其中 16 项为审批元数据用例。调岗后延迟采集、历史空白字段和并发软删除的 SQL 行为仍待实库验证。测试入口和数据库要求见 [开发规范](../../knowledge/conventions.md)。
 
