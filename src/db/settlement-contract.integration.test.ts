@@ -70,6 +70,7 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
       await runner({ dbClient: client, dir: migrationsDir, file, checkOrder: false,
         migrationsTable: 'settlement_test_migrations', direction: 'up', log: () => undefined });
     }
+    await client.query('ALTER TABLE ding_approval_instance ADD COLUMN IF NOT EXISTS originator_user_name_source_instance_id varchar(128)');
   });
   beforeEach(async () => {
     await client.query('TRUNCATE ding_user_snapshot, ding_process_template, ding_approval_instance, costing_read.allowed_process_template, costing_read.attachment_archive RESTART IDENTITY CASCADE');

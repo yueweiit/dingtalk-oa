@@ -9,6 +9,7 @@ const migration = require('../../migrations/20261110000000_separate_user_fetch_f
 const validation = require('../../migrations/20261110000001_validate_user_snapshot_current.cjs');
 const cleanup = require('../../migrations/20261110000002_purge_legacy_failed_user_snapshots.cjs');
 const departure = require('../../migrations/20261111000000_create_ding_user_departure.cjs');
+const directory = require('../../migrations/20261111000001_create_ding_user_directory.cjs');
 function build(direction: 'up' | 'down' = 'up', definition = migration) {
   const builder = new Builder({ query: () => { throw new Error('DATABASE_ACCESS_NOT_ALLOWED'); } }, undefined, false, console);
   definition[direction](builder);
@@ -16,6 +17,26 @@ function build(direction: 'up' | 'down' = 'up', definition = migration) {
 }
 
 describe('user snapshot migration and writer contract (no database)', () => {
+  it('adds a read-only directory and approval provenance without seeding snapshots', () => {
+    const { sql, transactional } = build('up', directory);
+    expect(transactional).toBe(true);
+    expect(sql).toContain('CREATE VIEW public.ding_user_directory');
+    expect(sql).toContain('SELECT DISTINCT ON (corp_id, user_id)');
+    expect(sql).toContain('ORDER BY corp_id, user_id, (name IS NULL), priority');
+    expect(sql).toContain("WHERE s.fetch_status = 'success'");
+    expect(sql).toContain("d.identity_method IN ('originator', 'manual') AND NOT d.identity_review_required");
+    expect(sql).toContain('i.corp_id = d.corp_id');
+    expect(sql).toContain('i.deleted_at IS NULL');
+    expect(sql).toContain('ADD COLUMN originator_user_name_source_instance_id varchar(128)');
+    expect(sql).toContain('ADD COLUMN approver_user_name_source_instance_id varchar(128)');
+    expect(sql).toContain('ON public.ding_user_departure (corp_id, user_id)');
+    expect(sql).toContain('REVOKE ALL ON public.ding_user_directory FROM PUBLIC');
+    expect(sql).not.toMatch(/\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE)\s+(?:public\.)?ding_user_snapshot\b/);
+    expect(sql).toContain('FOR SHARE OF d, i SKIP LOCKED');
+    expect(sql).toContain('WHERE corp_id = OLD.corp_id AND originator_user_name_source_instance_id = source_instance');
+    expect(sql).toContain('WHERE corp_id = OLD.corp_id AND approver_user_name_source_instance_id = source_instance');
+    expect(sql).toContain('AFTER UPDATE OF status, result, deleted_at, process_code');
+  });
   it('adds a transactional departure table keyed by enterprise and source approval with a bounded lock wait', () => {
     const { sql, transactional } = build('up', departure);
     expect(transactional).toBe(true);

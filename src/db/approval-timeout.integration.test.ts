@@ -41,6 +41,7 @@ describe.skipIf(!databaseUrl)('approval timeout task persistence (isolated Postg
         id BIGSERIAL PRIMARY KEY, corp_id VARCHAR(64) NOT NULL, process_instance_id VARCHAR(128) NOT NULL,
         task_id VARCHAR(128) NOT NULL, task_order INTEGER, activity_id VARCHAR(128), node_name VARCHAR(256),
         status VARCHAR(32), result VARCHAR(32), approver_user_id VARCHAR(128), approver_user_name VARCHAR(256),
+        approver_user_name_source_instance_id VARCHAR(128),
         approver_dept_id VARCHAR(128), approver_dept_name VARCHAR(256), start_time TIMESTAMPTZ,
         end_time TIMESTAMPTZ, remark TEXT, raw_payload JSONB, updated_at TIMESTAMPTZ DEFAULT now(),
         created_at TIMESTAMPTZ DEFAULT now(), UNIQUE(corp_id, process_instance_id, task_id)

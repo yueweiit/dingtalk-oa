@@ -47,6 +47,7 @@ describe.runIf(Boolean(databaseUrl))('broad financial contract (disposable Postg
       await runner({ dbClient: client, dir: migrationsDir, file: name, checkOrder: false,
         migrationsTable: 'financial_test_migrations', direction: 'up', log: () => undefined });
     }
+    await client.query('ALTER TABLE ding_approval_instance ADD COLUMN IF NOT EXISTS originator_user_name_source_instance_id varchar(128)');
   });
   beforeEach(async () => {
     await client.query(`TRUNCATE ding_process_template,ding_approval_instance,costing_read.allowed_process_template,
