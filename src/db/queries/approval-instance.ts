@@ -31,7 +31,7 @@ export async function upsertInstance(params: {
   form_component_values?: any;
   raw_payload?: any;
   last_event_time?: Date | null;
-}, client?: pg.PoolClient): Promise<DingApprovalInstance> {
+}, client?: pg.PoolClient, prioritizeAttachments = false): Promise<DingApprovalInstance> {
   const run = async (c: pg.PoolClient) => {
     const { rows } = await c.query<DingApprovalInstance>(
       `INSERT INTO ding_approval_instance (
@@ -88,7 +88,7 @@ export async function upsertInstance(params: {
         params.last_event_time ?? null,
       ]
     );
-    await synchronizeInstanceAttachments(params.corp_id, params.process_instance_id, c);
+    await synchronizeInstanceAttachments(params.corp_id, params.process_instance_id, c, undefined, prioritizeAttachments);
     return rows[0];
   };
   return client ? run(client) : withTransaction(run);

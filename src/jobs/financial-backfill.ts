@@ -17,7 +17,8 @@ export interface FinancialBackfillDependencies {
   wait: typeof delay;
 }
 const defaults: FinancialBackfillDependencies = {
-  claim:claimFinancialWindow,search:searchInstances,refresh:refreshApprovalInstance,
+  claim:claimFinancialWindow,search:searchInstances,
+  refresh: params => refreshApprovalInstance({ ...params, attachmentPriority: 'backfill' }),
   savePage:saveFinancialPage,finishInstance:finishFinancialInstance,nextPage:startNextFinancialPage,
   complete:completeFinancialWindow,fail:failFinancialWindow,wait:delay,
 };

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { claimPendingAttachments, enqueueTemplateAttachments } from './attachment-archive.js';
+import { claimPendingAttachments, enqueueTemplateAttachments, retireIneligibleAttachments, synchronizeInstanceAttachments } from './attachment-archive.js';
 
 const { query } = vi.hoisted(() => ({ query: vi.fn() }));
 vi.mock('../pool.js', () => ({
@@ -48,11 +48,47 @@ describe('template attachment archive', () => {
     expect(query).toHaveBeenCalledTimes(1);
   });
 
+  it.each([0, -1, 1.5, 1001])('rejects an invalid retirement batch limit %s', async limit => {
+    await expect(retireIneligibleAttachments(limit)).rejects.toThrow('ATTACHMENT_RETIREMENT_LIMIT_INVALID');
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('bounds retirement candidates and rechecks a scope re-enabled before its source lock', async () => {
+    query.mockResolvedValueOnce({ rows: [{ corp_id: 'corp', process_instance_id: 'restored' }] })
+      .mockResolvedValueOnce({ rows: [{}] })
+      .mockResolvedValueOnce({ rows: [{ process_code: 'OPS', raw_payload: {
+        operationRecords: [{ files: [{ fileId: 'retained-file' }] }],
+      } }] }).mockResolvedValue({ rows: [] });
+    expect(await retireIneligibleAttachments(100)).toBe(1);
+    expect(query.mock.calls[0]).toEqual([expect.stringContaining('LIMIT $1'), [100]]);
+    expect(query.mock.calls[1]).toEqual([expect.stringContaining('FOR UPDATE'), ['corp', 'restored']]);
+    expect(query.mock.calls.at(-1)).toEqual([expect.stringContaining('SET retired_at='),
+      ['corp', 'restored', ['retained-file']]]);
+  });
+
   it('binds the enterprise and process selectors for a scoped claim', async () => {
     query.mockResolvedValueOnce({ rows: [] });
 
     await claimPendingAttachments(10, false, { corpId: 'corp', processCode: 'OPS' });
     expect(query).toHaveBeenCalledWith(expect.stringContaining('costing_read.attachment_template_instances'),
-      [10, false, 'corp', null, null, 'OPS']);
+      [10, false, 'corp', null, null, 'OPS', false]);
+  });
+
+  it('binds live priority while preserving exact scope and canary restrictions', async () => {
+    query.mockResolvedValue({ rows: [] });
+    await claimPendingAttachments(1, true, { corpId: 'corp', processInstanceId: 'instance', fileId: 'file' }, true);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('costing_read.attachment_collection_instances'),
+      [1, true, 'corp', 'instance', 'file', null, true]);
+  });
+
+  it('marks new comment references from live refreshes without resetting failures on unchanged replays', async () => {
+    query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ process_code: 'OPS', raw_payload: {
+      operationRecords: [{ files: [{ fileId: 'new-comment', fileName: 'receipt.pdf' }] }],
+    } }] }).mockResolvedValue({ rows: [] });
+    await synchronizeInstanceAttachments('corp', 'instance', undefined, undefined, true);
+    const [sql, params] = query.mock.calls.find(([sql]) => sql.includes('INSERT INTO costing_read.attachment_archive'))!;
+    expect(params[15]).toBe(1);
+    expect(sql).toContain('IS DISTINCT FROM');
+    expect(sql).not.toContain("archive_status = 'pending'");
   });
 });

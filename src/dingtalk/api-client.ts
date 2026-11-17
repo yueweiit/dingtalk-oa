@@ -182,6 +182,7 @@ async function legacyApiCall(
   endpoint: string,
   payload: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
+  await acquireDingTalkApiSlot();
   const token = await tokenManager.getToken();
   const url = `https://oapi.dingtalk.com${endpoint}?access_token=${encodeURIComponent(token)}`;
   let usageRecorded = false;
@@ -190,6 +191,7 @@ async function legacyApiCall(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(10_000),
     });
     const text = await response.text();
     const data = text ? JSON.parse(text) as Record<string, unknown> : {};
@@ -337,6 +339,7 @@ export async function getApprovalAttachmentDownloadUrl(
   includeComments = false,
 ): Promise<string> {
   const data = await apiCall<Record<string, unknown>>('/workflow/processInstances/spaces/files/urls/download', {
+    timeoutMs: 10_000,
     method: 'POST',
     body: {
       processInstanceId,
@@ -398,6 +401,7 @@ export async function authorizeApprovalAttachmentDownload(
   userId: string,
 ): Promise<void> {
   const data = await apiCall<Record<string, unknown>>('/workflow/processInstances/spaces/files/authDownload', {
+    timeoutMs: 10_000,
     method: 'POST',
     body: { userId, fileInfos: [{ spaceId: numericSpaceId(spaceId), fileId }] },
   });
@@ -422,6 +426,7 @@ export async function getStorageDentryDownloadInfo(
     method: 'POST',
     body: { option: { version: 1, preferIntranet: false } },
     usageName: '/storage/spaces/{spaceId}/dentries/{dentryId}/downloadInfos/query',
+    timeoutMs: 10_000,
   });
   ensureDingTalkResult(data);
   return extractDownloadResource(data);
@@ -454,6 +459,7 @@ export async function getDriveFileDownloadInfo(
   const endpoint = `/drive/spaces/${encodeURIComponent(spaceId)}/files/${encodeURIComponent(fileId)}/downloadInfos?unionId=${encodeURIComponent(unionId)}`;
   const data = await apiCall<Record<string, unknown>>(endpoint, {
     usageName: '/drive/spaces/{spaceId}/files/{fileId}/downloadInfos',
+    timeoutMs: 10_000,
   });
   ensureDingTalkResult(data);
   return extractDownloadResource(data);
@@ -469,6 +475,7 @@ export async function getStorageThumbnailDownload(
     method: 'POST',
     body: { dentryIds: [dentryId] },
     usageName: '/storage/spaces/{spaceId}/thumbnails/query',
+    timeoutMs: 10_000,
     validate: (responseData) => {
       const body = ensureDingTalkResult(responseData);
       const rawItems = body.resultItems ?? body.result_items ?? body.items ?? body.list ?? [];

@@ -1,47 +1,19 @@
 import { parseArchiveTarget } from '../archive/archive-target.js';
-import { archiveAttachment } from '../archive/archive-job.js';
-import { resolveDingTalkArchiveDownload } from '../archive/dingtalk-download.js';
-import { headArchivedObject, putArchivedObject } from '../archive/minio-archive.js';
+import { archiveQueuedAttachment } from '../archive/archive-runtime.js';
 import { getConfig } from '../config/index.js';
 import {
   claimPendingAttachments,
   enqueueTemplateAttachments,
   isAttachmentTemplateEnabled,
   listWhitelistedInstances,
-  markAttachmentArchived,
   markAttachmentFailed,
-  recordApiUsage,
   updateArchiveHealth,
   synchronizeInstanceAttachments,
   retireIneligibleAttachments,
 } from '../db/queries/attachment-archive.js';
 import { closePool } from '../db/pool.js';
-import {
-  authorizeApprovalAttachmentDownload,
-  authorizeLegacyApprovalAttachment,
-  getApprovalAttachmentDownloadUrl,
-  getDriveFileDownloadInfo,
-  getLegacyApprovalAttachmentDownload,
-  getLegacyApprovalAttachmentSpaceId,
-  getStorageDentryDownloadInfo,
-  getStorageThumbnailDownload,
-  getThumbnailMediaDownload,
-  getUserUnionId,
-} from '../dingtalk/api-client.js';
 
 const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-
-async function fetchAttachment(
-  uri: string,
-  headers: Record<string, string> = {},
-): Promise<{ body: Buffer; contentType: string }> {
-  const response = await fetch(uri, { redirect: 'follow', headers });
-  if (!response.ok) throw new Error(`附件下载失败: HTTP ${response.status}`);
-  return {
-    body: Buffer.from(await response.arrayBuffer()),
-    contentType: response.headers.get('content-type') || 'application/octet-stream',
-  };
-}
 
 async function run(): Promise<void> {
   const target = parseArchiveTarget(process.argv.slice(2));
@@ -86,33 +58,7 @@ async function run(): Promise<void> {
     for (let index = 0; index < pending.length; index += 1) {
       const record = pending[index];
       try {
-        await archiveAttachment(record, {
-          headObject: headArchivedObject,
-          getDownload: (item) => resolveDingTalkArchiveDownload(item, {
-            downloadUserId: config.DINGTALK_ARCHIVE_DOWNLOAD_USER_ID,
-            configuredUnionId: config.DINGTALK_ARCHIVE_DOWNLOAD_UNION_ID,
-            api: {
-              workflowDownload: async (processInstanceId, fileId, includeComments) => ({
-                uri: await getApprovalAttachmentDownloadUrl(processInstanceId, fileId, includeComments),
-                headers: {},
-              }),
-              legacyFileUrl: getLegacyApprovalAttachmentDownload,
-              legacySpaceId: getLegacyApprovalAttachmentSpaceId,
-              legacyAuthorize: authorizeLegacyApprovalAttachment,
-              authorizeDownload: authorizeApprovalAttachmentDownload,
-              userUnionId: getUserUnionId,
-              storageDentryDownload: getStorageDentryDownloadInfo,
-              driveDownload: getDriveFileDownloadInfo,
-              storageThumbnail: getStorageThumbnailDownload,
-              thumbnailMedia: getThumbnailMediaDownload,
-            },
-          }),
-          fetchContent: fetchAttachment,
-          putObject: putArchivedObject,
-          markArchived: (id, result) => markAttachmentArchived(id, result, record.objectKey, record.claimGeneration),
-          // API 客户端记录签名地址请求；这里单独记录文件内容请求。
-          recordApiCall: recordApiUsage,
-        });
+        await archiveQueuedAttachment(record);
         processedCount += 1;
       } catch (error) {
         failedCount += 1;

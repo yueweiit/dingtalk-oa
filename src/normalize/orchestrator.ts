@@ -18,6 +18,7 @@ import { saveFormFields } from './form-field-extractor.js';
 import type { JsonValue } from '../db/json-types.js';
 import { monitorBudgetAlertForInstance } from '../jobs/budget-alert-monitor.js';
 import { monitorEmptyApprovalNodesForInstance } from '../jobs/approval-empty-node-monitor.js';
+import { notifyAttachmentQueue } from '../archive/queue-signal.js';
 
 export interface ProcessMessageParams {
   eventType: string;
@@ -35,6 +36,7 @@ export interface RefreshApprovalInstanceParams {
   processInstanceId: string;
   processCode?: string;
   originatorUserId?: string;
+  attachmentPriority?: 'live' | 'backfill';
 }
 
 /**
@@ -52,7 +54,7 @@ export async function persistApprovalInstance(
   });
   const normalizedTasks = normalizeTasks(params.corpId, params.processInstanceId, instanceDetail.tasks ?? []);
   await withTransaction(async (client) => {
-    const archivedInstance = await upsertInstance(normalizedInstance, client);
+    const archivedInstance = await upsertInstance(normalizedInstance, client, params.attachmentPriority !== 'backfill');
     if (departureProcessCodes.includes(normalizedInstance.process_code)) {
       await syncApprovalDeparture(client, archivedInstance);
     }
@@ -68,6 +70,9 @@ export async function persistApprovalInstance(
     }
     await tryRepairApprovalMetadata(client, params.corpId, [params.processInstanceId]);
   });
+
+  // Never download inside the approval transaction or wait for the worker here.
+  if (params.attachmentPriority !== 'backfill') notifyAttachmentQueue();
 
   const userIds = [normalizedInstance.originator_user_id, ...normalizedTasks.map(task => task.approver_user_id)]
     .filter((id): id is string => Boolean(id));

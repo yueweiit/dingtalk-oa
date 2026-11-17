@@ -23,6 +23,7 @@ interface ResolveOptions {
   api: DingTalkArchiveApi;
   downloadUserId?: string;
   configuredUnionId?: string;
+  allowPreview?: boolean;
 }
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp', '.tif', '.tiff']);
@@ -113,7 +114,7 @@ export async function resolveDingTalkArchiveDownload(
     },
   );
 
-  if (isImageFile(record.fileName)) {
+  if (options.allowPreview !== false && isImageFile(record.fileName)) {
     strategies.push(
       {
         name: 'storage_thumbnail',

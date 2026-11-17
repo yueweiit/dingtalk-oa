@@ -105,12 +105,12 @@ export const configSchema = z.object({
   FINANCIAL_BACKFILL_DELAY_MS: z.coerce.number().int().min(500).max(10000).default(2000),
   FINANCIAL_BACKFILL_MAX_WINDOWS: z.coerce.number().int().min(1).max(20).default(1),
 
-  // 已完成物流/物流采购的评论及附件轮转复查；迁移部署后显式启用。
+  // 已完成审批评论复查；附件后台任务开启时也自动启用，范围包含显式模板。
   COMPLETED_APPROVAL_REFRESH_ENABLED: z.string().default('false').transform((value) => ['1', 'true', 'yes', 'on'].includes(value.toLowerCase())),
-  COMPLETED_APPROVAL_REFRESH_CRON: z.string().default('*/30 * * * *'),
-  COMPLETED_APPROVAL_REFRESH_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(10),
+  COMPLETED_APPROVAL_REFRESH_CRON: z.string().default('*/5 * * * *'),
+  COMPLETED_APPROVAL_REFRESH_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(20),
   COMPLETED_APPROVAL_REFRESH_DELAY_MS: z.coerce.number().int().min(500).max(10_000).default(1000),
-  COMPLETED_APPROVAL_REFRESH_MIN_INTERVAL_SECONDS: z.coerce.number().int().min(60).max(604800).default(21600),
+  COMPLETED_APPROVAL_REFRESH_MIN_INTERVAL_SECONDS: z.coerce.number().int().min(60).max(604800).default(1800),
 
   // 成本系统附件归档（MinIO 只使用专用非 root 账号）
   ARCHIVE_MINIO_ENDPOINT: z.string().default('172.19.49.226'),
@@ -121,6 +121,10 @@ export const configSchema = z.object({
   ARCHIVE_MINIO_BUCKET: z.string().default('dingtalk-approval-archive'),
   ARCHIVE_BATCH_SIZE: z.coerce.number().int().min(1).max(10).default(10),
   ARCHIVE_DELAY_MS: z.coerce.number().int().min(1000).max(60_000).default(1000),
+  ARCHIVE_WORKER_ENABLED: z.string().default('false').transform(value => ['1', 'true', 'yes', 'on'].includes(value.toLowerCase())),
+  ARCHIVE_WORKER_POLL_MS: z.coerce.number().int().min(1000).max(60_000).default(5000),
+  ARCHIVE_DOWNLOAD_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300_000).default(60_000),
+  ARCHIVE_STORAGE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300_000).default(60_000),
   ARCHIVE_RECOVERY_CANARY_ONLY: z.string().default('false').transform((value) => ['1', 'true', 'yes', 'on'].includes(value.toLowerCase())),
   PACKING_SNAPSHOT_MINIO_BUCKET: z.string().trim().min(3).max(63).default('dingtalk-packing-snapshots'),
   PACKING_REFRESH_POLL_MS: z.coerce.number().int().min(1000).max(60_000).default(5000),

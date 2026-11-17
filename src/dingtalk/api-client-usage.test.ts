@@ -39,6 +39,7 @@ describe('DingTalk API usage accounting', () => {
       .resolves.toBe('https://download.example/file');
 
     expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toEqual(body);
+    expect((fetchMock.mock.calls[0][1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
     expect(recordApiUsage).toHaveBeenCalledWith(
       '/workflow/processInstances/spaces/files/urls/download',
       true,
@@ -68,6 +69,7 @@ describe('DingTalk API usage accounting', () => {
         uri: 'https://download.example/storage',
         headers: { Authorization: 'signed' },
       });
+    expect(fetchMock.mock.calls.every(([, options]) => (options as RequestInit).signal instanceof AbortSignal)).toBe(true);
   });
 
   it('creates the media fallback URL without exposing it to diagnostics', async () => {

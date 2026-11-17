@@ -7,7 +7,9 @@ import { AttachmentDownloadStrategiesError } from '../../archive/download-strate
 
 const BUCKET = process.env.ARCHIVE_MINIO_BUCKET || 'dingtalk-approval-archive';
 
-export async function upsertAttachmentCandidates(candidates: AttachmentCandidate[], client?: pg.PoolClient): Promise<number> {
+export async function upsertAttachmentCandidates(
+  candidates: AttachmentCandidate[], client?: pg.PoolClient, prioritize = false,
+): Promise<number> {
   if (!candidates.length) return 0;
   const run = async (client: pg.PoolClient) => {
     for (const row of candidates) {
@@ -16,8 +18,8 @@ export async function upsertAttachmentCandidates(candidates: AttachmentCandidate
            corp_id, process_instance_id, process_code, attachment_origin,
            file_id, space_id, file_name, declared_size, bucket, object_key,
            comment_user_id, comment_user_name, comment_time, comment_remark,
-           thumbnail_media_id
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+           thumbnail_media_id, queue_priority
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
          ON CONFLICT (corp_id, process_instance_id, file_id) DO UPDATE SET
            process_code = EXCLUDED.process_code,
            attachment_origin = EXCLUDED.attachment_origin,
@@ -29,6 +31,7 @@ export async function upsertAttachmentCandidates(candidates: AttachmentCandidate
            comment_time = EXCLUDED.comment_time,
            comment_remark = EXCLUDED.comment_remark,
            thumbnail_media_id = EXCLUDED.thumbnail_media_id,
+           queue_priority = GREATEST(attachment_archive.queue_priority, EXCLUDED.queue_priority),
            retired_at = NULL,
            updated_at = clock_timestamp()
          WHERE (attachment_archive.process_code, attachment_archive.attachment_origin,
@@ -46,7 +49,7 @@ export async function upsertAttachmentCandidates(candidates: AttachmentCandidate
           row.fileId, row.spaceId || null, row.fileName || null, row.declaredSize,
           BUCKET, row.objectKey, row.commentUserId || null, row.commentUserName || null,
           row.commentTime || null, row.commentRemark || null,
-          row.thumbnailMediaId || null,
+          row.thumbnailMediaId || null, prioritize ? 1 : 0,
         ],
       );
     }
@@ -60,6 +63,7 @@ export async function claimPendingAttachments(
   limit: number,
   recoveryCanariesOnly = false,
   target?: ArchiveTarget | Pick<ArchiveTemplateTarget, 'corpId' | 'processCode'>,
+  prioritize = false,
 ): Promise<PendingArchive[]> {
   const file = target && 'fileId' in target ? target : undefined;
   const processCode = target && 'processCode' in target ? target.processCode : null;
@@ -75,6 +79,10 @@ export async function claimPendingAttachments(
           )
             AND retired_at IS NULL
             AND attempts < 5
+            AND EXISTS (
+              SELECT 1 FROM costing_read.attachment_collection_instances eligible
+              WHERE eligible.corp_id=a.corp_id AND eligible.process_instance_id=a.process_instance_id
+            )
             AND (NOT $2::boolean OR recovery_canary)
             AND ($3::text IS NULL OR (a.corp_id=$3 AND (
               (a.process_instance_id=$4 AND a.file_id=$5)
@@ -84,7 +92,7 @@ export async function claimPendingAttachments(
                   AND i.process_code=a.process_code
               ))
             )))
-          ORDER BY a.updated_at ASC, a.id ASC
+          ORDER BY CASE WHEN $7::boolean THEN a.queue_priority ELSE 0 END DESC, a.updated_at ASC, a.id ASC
           FOR UPDATE OF a SKIP LOCKED
           LIMIT $1
        )
@@ -99,7 +107,7 @@ export async function claimPendingAttachments(
          FROM picked
         WHERE a.id = picked.id
        RETURNING a.*`,
-      [limit, recoveryCanariesOnly, target?.corpId ?? null, file?.processInstanceId ?? null, file?.fileId ?? null, processCode],
+      [limit, recoveryCanariesOnly, target?.corpId ?? null, file?.processInstanceId ?? null, file?.fileId ?? null, processCode, prioritize],
     );
     return rows.map(toPendingArchive);
   });
@@ -310,6 +318,7 @@ export async function updateArchiveHealth(params: {
 
 export async function synchronizeInstanceAttachments(
   corpId: string, processInstanceId: string, client?: pg.PoolClient, expectedProcessCode?: string,
+  prioritize = false,
 ): Promise<number> {
   const run = async (c: pg.PoolClient) => {
     await c.query(`SELECT 1 FROM public.ding_approval_instance
@@ -326,7 +335,7 @@ export async function synchronizeInstanceAttachments(
       rawPayload: { ...instance.raw_payload, formComponentValues:
         instance.raw_payload?.formComponentValues ?? instance.raw_payload?.form_component_values ?? instance.form_component_values },
     }) : [];
-    await upsertAttachmentCandidates(candidates, c);
+    await upsertAttachmentCandidates(candidates, c, prioritize);
     await c.query(`UPDATE costing_read.attachment_archive
       SET retired_at=clock_timestamp(), updated_at=clock_timestamp()
       WHERE corp_id=$1 AND process_instance_id=$2 AND retired_at IS NULL
@@ -336,18 +345,22 @@ export async function synchronizeInstanceAttachments(
   return client ? run(client) : withTransaction(run);
 }
 
-export async function retireIneligibleAttachments(): Promise<void> {
+export async function retireIneligibleAttachments(limit?: number): Promise<number> {
+  if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 1000)) {
+    throw new Error('ATTACHMENT_RETIREMENT_LIMIT_INVALID');
+  }
   const instances = await withClient(async (client) => {
     const { rows } = await client.query<{ corp_id: string; process_instance_id: string }>(`
       SELECT DISTINCT a.corp_id, a.process_instance_id FROM costing_read.attachment_archive a
       WHERE a.retired_at IS NULL AND NOT EXISTS (
         SELECT 1 FROM costing_read.attachment_collection_instances i
         WHERE i.corp_id=a.corp_id AND i.process_instance_id=a.process_instance_id
-      )`);
+      ) ORDER BY a.corp_id, a.process_instance_id LIMIT $1`, [limit ?? null]);
     return rows;
   });
   for (const instance of instances) {
     // Re-read eligibility under the same source lock as event/backfill writers.
     await synchronizeInstanceAttachments(instance.corp_id, instance.process_instance_id);
   }
+  return instances.length;
 }

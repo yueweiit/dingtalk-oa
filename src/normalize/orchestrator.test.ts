@@ -16,6 +16,7 @@ vi.mock('../jobs/budget-alert-monitor.js', () => ({ monitorBudgetAlertForInstanc
 vi.mock('../jobs/approval-empty-node-monitor.js', () => ({ monitorEmptyApprovalNodesForInstance: vi.fn() }));
 import { persistApprovalInstance, refreshApprovalInstance } from './orchestrator.js';
 import { InvalidApprovalInstanceIdError } from '../dingtalk/api-client.js';
+import { subscribeAttachmentQueue } from '../archive/queue-signal.js';
 
 describe('shared approval persistence and enrichment', () => {
   beforeEach(() => {
@@ -33,7 +34,7 @@ describe('shared approval persistence and enrichment', () => {
       ],
     });
     expect(state.order).toEqual(['begin', 'local-enrichment', 'commit', 'network-enrichment']);
-    expect(state.instance).toHaveBeenCalledWith(expect.objectContaining({ originator_user_id: 'originator' }), state.client);
+    expect(state.instance).toHaveBeenCalledWith(expect.objectContaining({ originator_user_id: 'originator' }), state.client, true);
     expect(state.repair).toHaveBeenCalledWith(state.client, 'corp-a', ['instance-a']);
     expect(state.sync).toHaveBeenCalledWith('corp-a', 'instance-a', ['originator', 'approver-a', 'approver-b']);
     expect(state.departure).not.toHaveBeenCalled();
@@ -58,5 +59,28 @@ describe('shared approval persistence and enrichment', () => {
     expect(state.order).toEqual([]);
     expect(state.instance).not.toHaveBeenCalled();
     expect(state.task).not.toHaveBeenCalled();
+  });
+
+  it('wakes the archive worker only after a committed live refresh', async () => {
+    const wake = vi.fn(() => { state.order.push('archive-wake'); });
+    const unsubscribe = subscribeAttachmentQueue(wake);
+    try {
+      await persistApprovalInstance({ corpId: 'corp', processInstanceId: 'live' }, { status: 'RUNNING' });
+      expect(state.order).toEqual(['begin', 'local-enrichment', 'commit', 'archive-wake']);
+      state.instance.mockRejectedValueOnce(new Error('rollback'));
+      await expect(persistApprovalInstance({ corpId: 'corp', processInstanceId: 'failed' }, { status: 'RUNNING' }))
+        .rejects.toThrow('rollback');
+      expect(wake).toHaveBeenCalledTimes(1);
+    } finally { unsubscribe(); }
+  });
+
+  it('leaves historical imports at ordinary priority without immediate wake-ups', async () => {
+    const wake = vi.fn();
+    const unsubscribe = subscribeAttachmentQueue(wake);
+    try {
+      await persistApprovalInstance({ corpId: 'corp', processInstanceId: 'old', attachmentPriority: 'backfill' }, { status: 'COMPLETED' });
+      expect(state.instance).toHaveBeenCalledWith(expect.anything(), state.client, false);
+      expect(wake).not.toHaveBeenCalled();
+    } finally { unsubscribe(); }
   });
 });

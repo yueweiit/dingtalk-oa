@@ -181,7 +181,7 @@ describe('reconcileRunningApprovalStatuses', () => {
     expect(findRunningInstances).toHaveBeenLastCalledWith(3, []);
     expect(upsertInstance.mock.calls.map(([row]) => row.process_instance_id))
       .toEqual(['healthy-instance', 'slow-instance', 'healthy-instance', 'cooling-instance']);
-    expect(upsertInstance).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'TERMINATED' }), expect.anything());
+    expect(upsertInstance).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'TERMINATED' }), expect.anything(), true);
     expect(deadlines).toHaveBeenCalledWith(10_000);
   });
 });

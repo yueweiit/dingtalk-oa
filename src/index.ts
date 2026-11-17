@@ -12,6 +12,7 @@ import { tokenManager } from './dingtalk/token-manager.js';
 import { syncTemplateNames } from './jobs/sync-template-names.js';
 import { startPackingRefreshWorker, stopPackingRefreshWorker } from './packing/refresh-worker.js';
 import { startApprovalRepairWorker, stopApprovalRepairWorker } from './jobs/approval-repair-worker.js';
+import { startAttachmentArchiveWorker, stopAttachmentArchiveWorker } from './jobs/attachment-archive-worker.js';
 
 async function main() {
   console.log('🚀 钉钉审批数据归档系统启动中...');
@@ -77,6 +78,7 @@ async function main() {
 
   // 8. 启动 Cron 调度器
   startScheduler();
+  startAttachmentArchiveWorker();
   console.log('✅ Cron 调度器启动成功');
 
   startPackingRefreshWorker();
@@ -100,6 +102,7 @@ async function main() {
 
     try {
       const approvalTimeoutStopped = stopScheduler();
+      const attachmentArchiveStopped = stopAttachmentArchiveWorker();
       console.log('✅ 定时任务已停止');
 
       stopPackingRefreshWorker();
@@ -123,6 +126,7 @@ async function main() {
       console.log('✅ Fastify 已关闭');
 
       await approvalTimeoutStopped;
+      await attachmentArchiveStopped;
       await closePool();
       console.log('✅ 数据库连接池已关闭');
 

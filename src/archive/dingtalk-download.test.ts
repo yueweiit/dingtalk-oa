@@ -149,4 +149,14 @@ describe('DingTalk archive resolver', () => {
     )).rejects.toMatchObject({ code: 'attachment_download_strategies_exhausted' });
     expect(thumbnailMedia).toHaveBeenCalledTimes(1);
   });
+
+  it('never substitutes a thumbnail when automatic archiving requires the original', async () => {
+    const thumbnailMedia = vi.fn(async () => ({ uri: 'https://download.example/thumb' }));
+    const storageThumbnail = vi.fn(async () => ({ uri: 'https://download.example/storage-thumb' }));
+    await expect(resolveDingTalkArchiveDownload(record, {
+      downloadUserId: 'ACTIVE-USER', allowPreview: false, api: api({ thumbnailMedia, storageThumbnail }),
+    })).rejects.toMatchObject({ code: 'attachment_download_strategies_exhausted' });
+    expect(thumbnailMedia).not.toHaveBeenCalled();
+    expect(storageThumbnail).not.toHaveBeenCalled();
+  });
 });

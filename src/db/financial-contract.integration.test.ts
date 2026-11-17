@@ -9,9 +9,11 @@ import {registerDiscoveredFinancialTemplate} from './queries/financial-template-
 import * as financialQueries from './queries/financial-backfill.js';
 import { findBackfillTemplates } from './queries/process-template.js';
 import { claimCompletedApprovalRefresh } from './queries/approval-instance.js';
+import { createAttachmentArchiveWorker } from '../jobs/attachment-archive-worker.js';
+import { listReadAttachments } from './queries/approval-read-api.js';
 import {
   claimPendingAttachments, enqueueTemplateAttachments, isAttachmentTemplateEnabled,
-  retireIneligibleAttachments, synchronizeInstanceAttachments,
+  retireIneligibleAttachments, synchronizeInstanceAttachments, updateArchiveHealth,
 } from './queries/attachment-archive.js';
 
 const databaseUrl = process.env.FINANCIAL_TEST_DATABASE_URL;
@@ -19,6 +21,7 @@ const migrationsDir = fileURLToPath(new URL('../../migrations', import.meta.url)
 const migrationName = '20260910010000_financial_source_scope';
 const projectionMigration = '20260910020000_financial_source_projection';
 const attachmentTemplateMigration = '20261117000000_add_attachment_template_scope';
+const attachmentPriorityMigration = '20261117010000_add_attachment_queue_priority';
 let client: pg.Client;
 const category = [{ name: '服务类采购', value: '物流及运输服务' }];
 const freight = [{ name: '采购分类', value: '商品采购' }, { name: '说明', value: '国际海运费及燃油附加费' }];
@@ -48,7 +51,7 @@ describe.runIf(Boolean(databaseUrl))('broad financial contract (disposable Postg
       '1788492060000_limit_archive_to_logistics', '1788505200000_add_archive_diagnostics',
       '1788508800000_create_costing_actor_names_view', '1788856369000_create_approval_repair_queue',
       '20260909000000_logistics_settlement_archive', '20260910000000_purchase_template_scope',
-      migrationName, projectionMigration, attachmentTemplateMigration]) {
+      migrationName, projectionMigration, attachmentTemplateMigration, attachmentPriorityMigration]) {
       await runner({ dbClient: client, dir: migrationsDir, file: name, checkOrder: false,
         migrationsTable: 'financial_test_migrations', direction: 'up', log: () => undefined });
     }
@@ -92,6 +95,60 @@ describe.runIf(Boolean(databaseUrl))('broad financial contract (disposable Postg
     expect((await client.query('SELECT process_instance_id FROM costing_read.eligible_attachment_instances ORDER BY 1')).rows.map(r => r.process_instance_id))
       .toEqual(['category','comment','reference','surcharge','wrong-category']);
     expect((await client.query('SELECT count(*) FROM costing_read.attachment_archive WHERE retired_at IS NULL')).rows[0].count).toBe('5');
+  });
+
+  it('prioritizes live files, preserves idempotency and leases, and excludes a disabled template', async () => {
+    await client.query(`INSERT INTO costing_read.attachment_template_scope(corp_id,process_code) VALUES ('corp-1','OPS')`);
+    const details = { corp_id: 'corp-1', process_code: 'OPS', status: 'RUNNING', raw_payload: {
+      operationRecords: [{ files: [{ fileId: 'receipt', fileName: 'receipt.pdf' }] }],
+    } };
+    await upsertInstance({ ...details, process_instance_id: 'history' });
+    await upsertInstance({ ...details, process_instance_id: 'live' }, undefined, true);
+    const before = (await client.query(`SELECT queue_priority,updated_at FROM costing_read.attachment_archive
+      WHERE process_instance_id='history'`)).rows[0];
+    // A live event with the same references must not promote/requeue an old file.
+    await upsertInstance({ ...details, process_instance_id: 'history' }, undefined, true);
+    expect((await client.query(`SELECT queue_priority,updated_at FROM costing_read.attachment_archive
+      WHERE process_instance_id='history'`)).rows[0]).toEqual(before);
+    expect((await claimPendingAttachments(1, false, undefined, true))[0].processInstanceId).toBe('live');
+    expect((await claimPendingAttachments(1, false, undefined, false))[0].processInstanceId).toBe('history');
+    expect(await claimPendingAttachments(1, false, undefined, true)).toEqual([]);
+    await upsertInstance({ ...details, process_instance_id: 'later' }, undefined, true);
+    await client.query(`UPDATE costing_read.attachment_template_scope SET enabled=false WHERE process_code='OPS'`);
+    expect(await claimPendingAttachments(1, false, undefined, true)).toEqual([]);
+    await client.query(`UPDATE costing_read.attachment_template_scope SET enabled=true WHERE process_code='OPS'`);
+    const claims = await Promise.all([claimPendingAttachments(1, false, undefined, true), claimPendingAttachments(1, false, undefined, true)]);
+    expect(claims.flat().map(row => row.processInstanceId)).toEqual(['later']);
+  });
+
+  it('adds and rolls back queue priority without changing archived evidence or public view columns', async () => {
+    await approval('retained-evidence', 'LOG', []);
+    await client.query(`UPDATE costing_read.attachment_archive SET archive_status='archived',
+      content_quality='original', actual_size=17, sha256=repeat('a',64), archived_at=clock_timestamp()
+      WHERE process_instance_id='retained-evidence'`);
+    const snapshot = async () => (await client.query(`SELECT to_jsonb(a)-'queue_priority' AS evidence
+      FROM costing_read.attachment_archive a WHERE process_instance_id='retained-evidence'`)).rows;
+    const viewColumns = async () => (await client.query(`SELECT c.relname,a.attname,a.atttypid,a.attnum
+      FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname='costing_read' AND c.relname IN ('attachment_archives_v1','attachment_archives_v2')
+        AND a.attnum>0 AND NOT a.attisdropped ORDER BY c.relname,a.attnum`)).rows;
+    const evidenceBefore = await snapshot();
+    const columnsBefore = await viewColumns();
+    const migrate = (direction: 'up' | 'down') => runner({ dbClient: client, dir: migrationsDir,
+      file: attachmentPriorityMigration, checkOrder: false, migrationsTable: 'financial_test_migrations',
+      direction, log: () => undefined });
+    await migrate('down');
+    try {
+      expect((await client.query(`SELECT to_regclass('costing_read.attachment_archive_queue_priority') AS index`)).rows[0].index)
+        .toBeNull();
+      expect(await snapshot()).toEqual(evidenceBefore);
+    } finally { await migrate('up'); }
+    expect((await client.query(`SELECT queue_priority FROM costing_read.attachment_archive
+      WHERE process_instance_id='retained-evidence'`)).rows).toEqual([{ queue_priority: 0 }]);
+    expect(await snapshot()).toEqual(evidenceBefore);
+    expect(await viewColumns()).toEqual(columnsBefore);
+    await expect(client.query(`UPDATE costing_read.attachment_archive SET queue_priority=2
+      WHERE process_instance_id='retained-evidence'`)).rejects.toMatchObject({ code: '23514' });
   });
 
   it('collects and claims regular expenses for an explicitly enabled corporation and process code', async () => {
@@ -144,6 +201,69 @@ describe.runIf(Boolean(databaseUrl))('broad financial contract (disposable Postg
     await retireIneligibleAttachments();
     expect((await client.query(`SELECT retired_at IS NOT NULL AS retired FROM costing_read.attachment_archive
       WHERE corp_id='corp-1' AND process_instance_id='general'`)).rows).toEqual([{ retired: true }]);
+  });
+
+  it('automatically publishes retirement to incremental readers without another source refresh or CLI run', async () => {
+    await template('GENERAL', '通用审批');
+    await template('GENERAL', '通用审批', 'corp-2');
+    await client.query(`INSERT INTO costing_read.attachment_template_scope(corp_id,process_code)
+      VALUES ('corp-1','GENERAL'), ('corp-2','GENERAL')`);
+    await approval('archived', 'GENERAL', []);
+    await approval('pending', 'GENERAL', []);
+    await client.query(`UPDATE costing_read.attachment_archive SET archive_status='archived',
+      actual_size=3, sha256=repeat('a',64), archived_at=now() WHERE process_instance_id='archived'`);
+    await upsertInstance({ corp_id: 'corp-2', process_instance_id: 'archived', process_code: 'GENERAL',
+      status: 'COMPLETED', raw_payload: { operationRecords: [{ files: [file] }] } });
+    const before = await listReadAttachments({ filters: { corpId: 'corp-1', processCode: 'GENERAL' }, limit: 10 });
+    await client.query(`UPDATE costing_read.attachment_template_scope SET enabled=false
+      WHERE corp_id='corp-1' AND process_code='GENERAL'`);
+    let finish!: () => void;
+    const completed = new Promise<void>(resolve => { finish = resolve; });
+    const errors: string[] = [];
+    let downloads = 0;
+    const worker = createAttachmentArchiveWorker({ pollMs: 60_000, batchSize: 2, delayMs: 1 }, {
+      retire: () => retireIneligibleAttachments(100),
+      claim: async prioritize => (await claimPendingAttachments(1, false,
+        { corpId: 'corp-1', processCode: 'GENERAL' }, prioritize))[0],
+      archive: async () => { downloads++; }, fail: async () => {},
+      report: async result => {
+        try {
+          await updateArchiveHealth({ ...result, completed: true, scannedCount: 0,
+            error: result.errorCode ? new Error(result.errorCode) : undefined });
+        } finally { finish(); }
+      },
+      onError: code => { errors.push(code); },
+    });
+    try {
+      worker.start();
+      await completed;
+    } finally { await worker.stop(); }
+    expect(errors).toEqual([]);
+    expect(downloads).toBe(0);
+    const changed = await listReadAttachments({ filters: { corpId: 'corp-1', processCode: 'GENERAL',
+      updatedAfter: before.syncUntil }, limit: 10 });
+    expect(changed.items).toHaveLength(2);
+    expect(changed.items.every(row => row.retiredAt !== null)).toBe(true);
+    expect(changed.items.find(row => row.processInstanceId === 'archived')).toMatchObject({
+      archiveStatus: 'archived', actualSize: '3', sha256: 'a'.repeat(64),
+    });
+    expect((await client.query(`SELECT retired_at FROM costing_read.attachment_archive WHERE corp_id='corp-2'`)).rows)
+      .toEqual([{ retired_at: null }]);
+  });
+
+  it('bounds retirement batches and preserves records still eligible through the original collection rules', async () => {
+    await client.query(`INSERT INTO costing_read.attachment_template_scope(corp_id,process_code)
+      VALUES ('corp-1','GENERAL'), ('corp-1','LOG')`);
+    for (const id of ['first', 'second', 'third']) await approval(id, 'GENERAL', []);
+    await approval('original-scope', 'LOG', []);
+    await client.query('UPDATE costing_read.attachment_template_scope SET enabled=false');
+    expect(await retireIneligibleAttachments(2)).toBe(2);
+    expect((await client.query(`SELECT count(*)::int AS count FROM costing_read.attachment_archive
+      WHERE retired_at IS NOT NULL`)).rows).toEqual([{ count: 2 }]);
+    expect(await retireIneligibleAttachments(2)).toBe(1);
+    expect(await retireIneligibleAttachments(2)).toBe(0);
+    expect((await client.query(`SELECT process_instance_id FROM costing_read.attachment_archive
+      WHERE retired_at IS NULL`)).rows).toEqual([{ process_instance_id: 'original-scope' }]);
   });
 
   it('accepts a financial form under an unrelated name only with transport evidence and retains invalidation', async () => {

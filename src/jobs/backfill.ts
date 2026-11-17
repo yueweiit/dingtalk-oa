@@ -202,5 +202,5 @@ async function backfillInstance(corp_id: string, processInstanceId: string, proc
   const instanceDetail = await getInstance(processInstanceId);
 
   await persistApprovalInstance({ corpId: corp_id, processInstanceId,
-    processCode: processCode || instanceDetail.processCode || undefined }, instanceDetail);
+    processCode: processCode || instanceDetail.processCode || undefined, attachmentPriority: 'backfill' }, instanceDetail);
 }

@@ -5,6 +5,7 @@ import { configSchema } from '../config/schema.js';
 const state = vi.hoisted(() => ({
   enabled: true,
   financialEnabled: false,
+  archiveEnabled: false,
   corpId: 'corp',
   financial: vi.fn(),
   schedules: [] as Array<{ expression: string; run: () => Promise<void> }>,
@@ -17,6 +18,7 @@ vi.mock('node-cron', () => ({ default: { schedule: (expression: string, run: () 
   return { stop: vi.fn() };
 } } }));
 vi.mock('../config/index.js', () => ({ getConfig: () => ({
+  ARCHIVE_WORKER_ENABLED: state.archiveEnabled,
   FINANCIAL_BACKFILL_ENABLED: state.financialEnabled,
   FINANCIAL_BACKFILL_CRON: '*/10 * * * *',
   FINANCIAL_BACKFILL_MAX_WINDOWS: 1,
@@ -40,14 +42,14 @@ vi.mock('../db/queries/corp-config.js',()=>({getAllCorpIds:async()=>[{corp_id:'f
 vi.mock('./financial-backfill.js', () => ({ runFinancialBackfill: state.financial }));
 import { startScheduler, stopScheduler } from './scheduler.js';
 
-afterEach(async () => { await stopScheduler(); state.schedules.length = 0; state.refresh.mockReset(); state.timeout.mockReset(); state.reconcile.mockReset(); state.financial.mockReset(); state.financialEnabled=false; state.corpId='corp'; });
+afterEach(async () => { await stopScheduler(); state.schedules.length = 0; state.refresh.mockReset(); state.timeout.mockReset(); state.reconcile.mockReset(); state.financial.mockReset(); state.financialEnabled=false; state.archiveEnabled=false; state.corpId='corp'; });
 
 describe('completed approval refresh scheduling', () => {
   it('has bounded, explicitly enabled configuration', () => {
     const environment = { PGUSER: 'x', PGPASSWORD: 'x', PGDATABASE: 'x', DINGTALK_APP_KEY: 'x', DINGTALK_APP_SECRET: 'x' };
     const config = configSchema.parse(environment);
     expect(config).toMatchObject({ COMPLETED_APPROVAL_REFRESH_ENABLED: false,
-      COMPLETED_APPROVAL_REFRESH_BATCH_SIZE: 10, COMPLETED_APPROVAL_REFRESH_MIN_INTERVAL_SECONDS: 21600 });
+      COMPLETED_APPROVAL_REFRESH_BATCH_SIZE: 20, COMPLETED_APPROVAL_REFRESH_MIN_INTERVAL_SECONDS: 1800 });
     expect(configSchema.safeParse({ ...environment, COMPLETED_APPROVAL_REFRESH_BATCH_SIZE: 101 }).success).toBe(false);
   });
 
@@ -70,6 +72,25 @@ describe('completed approval refresh scheduling', () => {
     state.enabled = false;
     startScheduler();
     expect(state.schedules.some(row => row.expression === '*/30 * * * *')).toBe(false);
+  });
+
+  it('enables comment refresh with automatic archiving and drains it before shutdown', async () => {
+    state.enabled = false;
+    state.archiveEnabled = true;
+    let release!: () => void;
+    state.refresh.mockImplementation(() => new Promise<void>(resolve => { release = resolve; }));
+    startScheduler();
+    const task = state.schedules.find(row => row.expression === '*/30 * * * *')!;
+    const running = task.run();
+    let stopped = false;
+    const stopping = stopScheduler().then(() => { stopped = true; });
+    await task.run();
+    expect(state.refresh).toHaveBeenCalledTimes(1);
+    expect(stopped).toBe(false);
+    release();
+    await running;
+    await stopping;
+    expect(stopped).toBe(true);
   });
 });
 

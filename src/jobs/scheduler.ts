@@ -12,6 +12,7 @@ import { refreshCompletedLogisticsApprovals } from './completed-approval-refresh
 let scheduledTasks: cron.ScheduledTask[] = [];
 let approvalTimeoutController = new AbortController();
 let approvalTimeoutRun: Promise<void> | undefined;
+let completedRefreshRun: Promise<void> | undefined;
 
 export function startScheduler(): void {
   const config = getConfig();
@@ -120,23 +121,18 @@ export function startScheduler(): void {
     }, {timezone:'Asia/Shanghai'}));
   }
 
-  if (config.COMPLETED_APPROVAL_REFRESH_ENABLED) {
-    let running = false;
+  if (config.COMPLETED_APPROVAL_REFRESH_ENABLED || config.ARCHIVE_WORKER_ENABLED) {
     scheduledTasks.push(cron.schedule(config.COMPLETED_APPROVAL_REFRESH_CRON, async () => {
-      if (running) return;
-      running = true;
-      try {
-        const result = await refreshCompletedLogisticsApprovals({
+      if (approvalTimeoutSignal.aborted || completedRefreshRun) return;
+      completedRefreshRun = refreshCompletedLogisticsApprovals({
           limit: config.COMPLETED_APPROVAL_REFRESH_BATCH_SIZE,
           delayMs: config.COMPLETED_APPROVAL_REFRESH_DELAY_MS,
           minIntervalSeconds: config.COMPLETED_APPROVAL_REFRESH_MIN_INTERVAL_SECONDS,
-        });
-        console.log('[Scheduler] 已完成物流审批复查:', result);
-      } catch (error) {
-        console.error('[Scheduler] 已完成物流审批复查失败:', error);
-      } finally {
-        running = false;
-      }
+        })
+        .then(result => { console.log('[Scheduler] COMPLETED_APPROVAL_REFRESH_FINISHED', result); })
+        .catch(() => { console.error('[Scheduler] COMPLETED_APPROVAL_REFRESH_FAILED'); })
+        .finally(() => { completedRefreshRun = undefined; });
+      await completedRefreshRun;
     }, { timezone: 'Asia/Shanghai' }));
   }
 
@@ -157,7 +153,7 @@ export function stopScheduler(): Promise<void> {
   }
   scheduledTasks = [];
   console.log('[Scheduler] 定时任务已停止');
-  return approvalTimeoutRun ?? Promise.resolve();
+  return Promise.all([approvalTimeoutRun, completedRefreshRun]).then(() => undefined);
 }
 
 /**

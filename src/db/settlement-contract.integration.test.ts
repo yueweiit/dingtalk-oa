@@ -15,6 +15,7 @@ const databaseUrl = process.env.SETTLEMENT_TEST_DATABASE_URL;
 const migrationName = '20260909000000_logistics_settlement_archive';
 const scopeMigrationName = '20260910000000_purchase_template_scope';
 const attachmentTemplateMigrationName = '20261117000000_add_attachment_template_scope';
+const attachmentPriorityMigrationName = '20261117010000_add_attachment_queue_priority';
 const migrationsDir = fileURLToPath(new URL('../../migrations', import.meta.url));
 const hasMigration = existsSync(`${migrationsDir}/${migrationName}.cjs`);
 const hasScopeMigration = existsSync(`${migrationsDir}/${scopeMigrationName}.cjs`);
@@ -49,6 +50,10 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
       await client.query('TRUNCATE costing_read.allowed_process_template CASCADE');
     }
     if (hasMigration && (await client.query("SELECT to_regclass('settlement_test_migrations') AS relation")).rows[0].relation) {
+      if ((await client.query('SELECT 1 FROM settlement_test_migrations WHERE name=$1', [attachmentPriorityMigrationName])).rowCount) {
+        await runner({ dbClient: client, dir: migrationsDir, file: attachmentPriorityMigrationName, checkOrder: false,
+          migrationsTable: 'settlement_test_migrations', direction: 'down', log: () => undefined });
+      }
       if ((await client.query('SELECT 1 FROM settlement_test_migrations WHERE name=$1', [attachmentTemplateMigrationName])).rowCount) {
         await runner({ dbClient: client, dir: migrationsDir, file: attachmentTemplateMigrationName, checkOrder: false,
           migrationsTable: 'settlement_test_migrations', direction: 'down', log: () => undefined });
@@ -72,6 +77,7 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
       ...(hasMigration ? [migrationName] : []),
       ...(hasScopeMigration ? [scopeMigrationName] : []),
       attachmentTemplateMigrationName,
+      attachmentPriorityMigrationName,
     ]) {
       await runner({ dbClient: client, dir: migrationsDir, file, checkOrder: false,
         migrationsTable: 'settlement_test_migrations', direction: 'up', log: () => undefined });
