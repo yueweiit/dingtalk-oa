@@ -41,6 +41,11 @@ const pausedApprovalInstancesSchema = z.string().default('')
   .transform(value => value.split(/[\s,;]+/).filter(Boolean).map(entry => entry.split(':')))
   .pipe(z.array(z.tuple([z.string().min(1).max(64), z.string().min(1).max(128)])));
 
+const optionalArchiveIdentitySchema = z.preprocess(
+  value => typeof value === 'string' && !value.trim() ? undefined : value,
+  z.string().trim().min(1).optional(),
+);
+
 export const configSchema = z.object({
   // PostgreSQL
   PGHOST: z.string().default('localhost'),
@@ -54,8 +59,8 @@ export const configSchema = z.object({
   DINGTALK_APP_SECRET: z.string(),
   DINGTALK_CORP_ID: z.string().optional(),
   DINGTALK_TEMPLATE_ADMIN_USER_ID: z.string().trim().min(1).optional(),
-  DINGTALK_ARCHIVE_DOWNLOAD_USER_ID: z.string().trim().min(1).optional(),
-  DINGTALK_ARCHIVE_DOWNLOAD_UNION_ID: z.string().trim().min(1).optional(),
+  DINGTALK_ARCHIVE_DOWNLOAD_USER_ID: optionalArchiveIdentitySchema,
+  DINGTALK_ARCHIVE_DOWNLOAD_UNION_ID: optionalArchiveIdentitySchema,
   DINGTALK_PACKING_READER_USER_ID: z.string().trim().min(1).optional(),
   DINGTALK_PACKING_WORKBOOKS_JSON: packingWorkbooksSchema,
 

@@ -86,6 +86,36 @@ describe('DingTalk archive resolver', () => {
     expect(result.archiveMethod).toBe('legacy_dentry_auth');
   });
 
+  it.each(['storage_dentry', 'drive_download'] as const)(
+    'uses the dedicated user and resolves its unionId automatically for %s', async (method) => {
+      const legacyAuthorize = vi.fn(async () => { throw new Error('noPermission'); });
+      const authorizeDownload = vi.fn(async () => { throw new Error('noPermission'); });
+      const userUnionId = vi.fn(async () => 'UNION-1');
+      const storageDentryDownload = vi.fn(async () => {
+        if (method === 'drive_download') throw new Error('permissionDenied');
+        return { uri: 'https://download.example/storage' };
+      });
+      const driveDownload = vi.fn(async () => ({ uri: 'https://download.example/drive' }));
+
+      const result = await resolveDingTalkArchiveDownload(record, {
+        downloadUserId: 'ACTIVE-USER',
+        api: api({ legacyAuthorize, authorizeDownload, userUnionId, storageDentryDownload, driveDownload }),
+      });
+
+      expect(result).toMatchObject({ archiveMethod: method, contentQuality: 'original' });
+      expect(legacyAuthorize).toHaveBeenCalledWith(record.fileId, record.spaceId, 'ACTIVE-USER');
+      expect(authorizeDownload).toHaveBeenCalledWith(record.fileId, record.spaceId, 'ACTIVE-USER');
+      expect(userUnionId).toHaveBeenCalledTimes(1);
+      expect(userUnionId).toHaveBeenCalledWith('ACTIVE-USER');
+      expect(storageDentryDownload).toHaveBeenCalledWith(record.spaceId, record.fileId, 'UNION-1');
+      if (method === 'drive_download') {
+        expect(driveDownload).toHaveBeenCalledWith(record.spaceId, record.fileId, 'UNION-1');
+      } else {
+        expect(driveDownload).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   it.each([
     ['form', false],
     ['comment', true],
