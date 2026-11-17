@@ -27,6 +27,7 @@
 | 附件 file_id / attachment_origin / sha256 | VARCHAR(256) / VARCHAR(16) / CHAR(64) | 同一企业和实例内按 file_id 去重；attachment_origin 为 form 或 comment |
 | 附件 declared_size / actual_size | BIGINT | 源声明与下载字节数；原件下载时有大小比对 |
 | 附件 revision_generation / claim_generation | BIGINT | 归档版本及领取代次；结合 object_key 阻止旧任务覆盖当前结果 |
+| 附件 queue_priority | SMALLINT，0/1，默认 0 | 实时详情发现的新增或变化附件为 1；历史补录为 0；完全相同的清单重放不提升。仅影响后台领取顺序，不修改对外视图列，见[优先级迁移](../../migrations/20261117010000_add_attachment_queue_priority.cjs) |
 | 附件 retired_at / 实例 deleted_at | TIMESTAMPTZ | 两种删除/退役标记，v2 下游需独立处理 |
 | 附件模板 enabled | BOOLEAN | 按 `corp_id + process_code` 开启模板附件收集。该模板未删除的审批可进入队列，见 [模板归档规则](../modules/attachment-archive/README.md#归档范围与身份) |
 | 财务 transport_evidence | TEXT[] | logistics_category、main_freight、transport_surcharge、logistics_reference |

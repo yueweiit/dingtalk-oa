@@ -23,7 +23,8 @@ flowchart LR
   DB --> READAPI["无需鉴权的审批/附件 HTTP API"]
   MINIO --> READAPI
   READAPI --> SYSTEM["其他业务系统"]
-  DB --> ARC["附件归档 CLI"]
+  DB --> ARC["附件后台任务 / 恢复 CLI"]
+  TX -->|"提交后唤醒"| ARC
   ARC --> MINIO["MinIO"]
   VIEW --> DOWN["下游成本系统"]
   MINIO --> DOWN
@@ -43,6 +44,7 @@ flowchart LR
 - `persistApprovalInstance` 在一个 PostgreSQL 事务内写审批实例、任务及表单字段；`upsertInstance` 同步附件清单，迁移触发器维护财务投影和时间水位。字段元数据通过 SAVEPOINT 隔离单字段失败。
 - 用户快照在提交后异步更新。空节点和预算检查在事件编排路径执行，异常被隔离；直接刷新/补录路径不会自动执行这两个预警。
 - 附件对象 PUT 与数据库清单更新不是跨系统原子事务；通过对象标识、HEAD 恢复及 claim generation 校验收敛。详见 [附件流程](../modules/attachment-archive/workflow.md)。
+- 附件后台任务消费持久队列，在审批事务提交后唤醒，轮询覆盖重启与跨进程写入，并周期性分批退役失去资格的清单。实时附件优先，同时给历史记录保留处理机会；下载逻辑与 CLI 共用 [archive-runtime](../../src/archive/archive-runtime.ts)。范围、超时和健康记录规则见[自动归档](../modules/attachment-archive/README.md#提交和评论附件自动归档)。
 
 ## 公共能力及修改影响
 

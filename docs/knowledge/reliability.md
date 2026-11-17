@@ -29,7 +29,7 @@
 | R8 | [normalizeInstance](../../src/normalize/instance-normalizer.ts) 本地时间作为 last_event_time；[upsert](../../src/db/queries/approval-instance.ts) 无按源版本拒绝旧详情的条件 | 并发刷新可能存在快照先后覆盖问题；生产发生情况待验证，不应称严格有序 |
 | R9 | [修复](../../src/db/queries/approval-repair.ts) 与 [装箱](../../src/db/queries/packing-workbook.ts) 结果按 id 写回；装箱最后一次领取后崩溃没有修复队列那样的终态清理 | 超时重领有旧 worker 写回风险；装箱 attempts=3 的 running 可能滞留，需要单独恢复设计 |
 | R10 | [装箱缓存](../../src/packing/refresh-worker.ts) unionId Promise 失败后未重置；[快照](../../src/packing/snapshot-store.ts) hash 包含采集时间 | 身份查询失败可能持续影响进程；相同单元格的不同采集不一定去重，容量需按实际采集频率评估 |
-| R11 | 多处 fetch 未设置超时；全局扫描 [listWhitelistedInstances](../../src/db/queries/attachment-archive.ts) 无分页，归档 CLI 全量同步清单后仅领取小批；[下载](../../src/cli/archive-attachments.ts) 整体载入 Buffer | 大量记录/大附件可能增加延迟和内存；需业务规模和性能证据后再优化 |
+| R11 | 新附件后台任务逐个领取队列，下载地址请求、正文传输及 [MinIO 检查/上传](../../src/archive/minio-archive.ts) 有超时；后台分批退役失去资格的清单，批次级异常也写入失败健康结果。旧 CLI 全局扫描 [listWhitelistedInstances](../../src/db/queries/attachment-archive.ts) 仍无分页；[正文下载](../../src/archive/archive-runtime.ts) 仍整体载入 Buffer | 手工全局扫描和大附件仍可能增加延迟与内存；部分其他外部请求仍无超时，不能视为全系统已解决 |
 | R12 | 手工白名单只有流程码、单组钉钉凭据、装箱请求按工作簿选择企业；[认证](authentication.md) 有详细依据 | 多企业数据维度不等于完整租户授权，不能直接扩展成通用多租户服务 |
 | R13 | [parseDingTalkTime](../../src/normalize/instance-normalizer.ts) 改写 Z 后缀；无时区字符串按 Date 默认解释 | 时间口径依赖上游样本与运行时；历史修正、超时、报表需联合回归 |
 | R14 | [财务 SQL](../../migrations/20260910010000_financial_source_scope.cjs) 依赖名称/关键词；[预算](../../src/jobs/budget-alert-monitor.ts) 使用 number 和对端等级；无统一币种或翻译资源 | 分类与数值边界需样本；不能把识别关键词视为完整多语言或金额准确性保障 |

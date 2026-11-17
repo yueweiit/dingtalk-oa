@@ -8,15 +8,19 @@
 flowchart TD
   S["源审批写入或 CLI 同步"] --> EL{"当前符合收集资格"}
   EL -->|否| RET["清单 retired_at"]
+  CLEAN["后台启动及周期分批检查"] -->|失去全部收集资格| RET
   EL -->|是| EX["提取表单与评论附件"]
   EX --> UPS["差异 upsert 与版本更新"]
-  UPS --> P["pending"]
+  UPS --> P["pending：实时优先或历史普通"]
+  P --> W["提交后唤醒 / 持久队列轮询"]
+  W --> CLAIM
   P --> CLAIM["行锁领取并递增代次"]
   R["retry 且退避到期"] --> CLAIM
   STALE["archiving 超过十五分钟"] --> CLAIM
   CLAIM --> H{"当前对象 HEAD 存在"}
   H -->|是| SAVE["代次与对象键校验后 archived"]
   H -->|否| D["依次获取下载地址"]
+  H -->|失败或超时| F
   D --> B["下载字节和原件大小检查"]
   B --> PUT["SHA256 与 MinIO PUT"]
   PUT --> SAVE
@@ -27,7 +31,7 @@ flowchart TD
   F -->|否| R
 ```
 
-代码依据：[archive-job](../../../src/archive/archive-job.ts)、[查询](../../../src/db/queries/attachment-archive.ts)、[CLI](../../../src/cli/archive-attachments.ts)、[版本触发器](../../../migrations/20260909000000_logistics_settlement_archive.cjs)。
+代码依据：[archive-job](../../../src/archive/archive-job.ts)、[查询](../../../src/db/queries/attachment-archive.ts)、[后台任务](../../../src/jobs/attachment-archive-worker.ts)、[CLI](../../../src/cli/archive-attachments.ts)、[版本触发器](../../../migrations/20260909000000_logistics_settlement_archive.cjs)。自动归档的启用、优先级与评论发现时限见[模块说明](README.md#提交和评论附件自动归档)。
 
 ## 与状态枚举正交的维度
 

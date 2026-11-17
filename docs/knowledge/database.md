@@ -57,6 +57,7 @@ erDiagram
 - 基础实例有表单 JSONB GIN、状态/企业、创建时间索引；[增量索引迁移](../../migrations/20260730000000_add_approval_instance_updated_at_index.cjs) 和财务投影关联 ID GIN 支撑后续查询。实际查询计划和数据规模待验证。
 - [HTTP 读取索引迁移](../../migrations/20261029000000_approval_read_api_indexes.cjs) 为实例和附件清单补充企业+更新时间+稳定 ID 索引，包含删除/退役记录，供 [只读 API](../modules/approval-read-api/README.md) 游标分页使用。此迁移文件已准备，未应用到生产，真实查询计划待验证。
 - 事务、租约、代次校验因队列而异，见 [可靠性矩阵](reliability.md)。核心字段与水位见 [数据字典](data-dictionary.md)。
+- [附件优先级迁移](../../migrations/20261117010000_add_attachment_queue_priority.cjs) 为既有清单增加 `queue_priority`（0/1、默认 0）和待处理部分索引，不重置历史状态、不改 v1/v2 视图。新版写入代码启动前须应用；down 仅移除优先级列及索引，回滚前应停新版 worker 并换回兼容代码。
 - 多数归档表有 corp_id，但没有发现数据库 RLS。白名单旧表仅按流程码，自动采购/财务范围额外按企业约束；不得宣称全部唯一键都含 corp_id。
 - v1/v2 视图是下游兼容接口。变更列名、顺序、类型、删除标记或水位必须检查后续迁移重定义、查询及下游调用。
 
