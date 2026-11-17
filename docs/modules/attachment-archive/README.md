@@ -14,6 +14,8 @@
 
 下载策略可能使用主应用 token、专用 userId/unionId 和访问授权请求。未授权用户、权限不足、源文件不存在等不通过绕过权限解决。
 
+工作流下载接口对评论来源的附件传 `withCommentAttatchment: true`，首次请求和授权后重试都使用该字段。字段拼写见 [钉钉 SDK](https://pkg.go.dev/github.com/alibabacloud-go/dingtalk@v1.7.46/workflow_1_0#GrantProcessInstanceForDownloadFileRequest)。
+
 ## 归档步骤与一致性
 
 1. 实例写入调用清单同步；附件内容仍未下载。
@@ -28,6 +30,8 @@
 [parseArchiveTarget](../../../src/archive/archive-target.ts) 要求 --corp-id、--instance-id、--file-id 三个参数同时完整且各一次，未知/缺失/重复参数直接失败，避免误落入全局扫描。精确模式只同步对应实例并领取对应文件，跳过全局退役与扫描，仍受资格、租约、退避和次数限制。
 
 [prepare-archive-recovery](../../../src/cli/prepare-archive-recovery.ts) 维护试探样本和成功样本剩余附件队列；ARCHIVE_RECOVERY_CANARY_ONLY 会限制领取。它们会改队列并可能引发后续外部请求，非只读检查。
+
+恢复脚本选择 `userNotExist` 记录。其他 `manual_required` 记录修复原因后，由运维按企业、审批实例和文件 ID 确认目标仍活跃且符合归档资格，将状态改为 `pending`，清零 `attempts`、清空 `claimed_at` 并更新 `updated_at`，然后运行修复版 CLI 的精确模式。用清单状态、`content_quality` 和实际下载结果验收。 [领取及恢复查询](../../../src/db/queries/attachment-archive.ts)
 
 ## 下游契约和代码映射
 
