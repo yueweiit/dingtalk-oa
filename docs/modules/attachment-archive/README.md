@@ -18,6 +18,26 @@
 
 工作流下载接口对评论来源的附件传 `withCommentAttatchment: true`，首次请求和授权后重试都使用该字段。字段拼写见 [钉钉 SDK](https://pkg.go.dev/github.com/alibabacloud-go/dingtalk@v1.7.46/workflow_1_0#GrantProcessInstanceForDownloadFileRequest)。
 
+### 固定归档下载用户
+
+在运行归档 CLI 的环境中设置专用下载用户，推荐只填写员工 UserID，让程序自动查询该用户的 unionId：
+
+```dotenv
+DINGTALK_ARCHIVE_DOWNLOAD_USER_ID=replace_with_authorized_user_id
+# 推荐省略此项；新版配置校验也允许空白值，含义为自动查询。
+# DINGTALK_ARCHIVE_DOWNLOAD_UNION_ID=
+```
+
+员工 UserID 可在钉钉管理后台“通讯录 > 成员管理”的成员信息中获取。选择属于当前应用企业、长期有效且在应用可使用范围内的账号，并验证它能下载目标审批的附件。管理员身份本身不能代替具体文件授权；应用接口权限和用户对文件的权限都需要满足。人员获取与授权条件可参考[官方接入说明](https://help.aliyun.com/zh/polardb/polardb-for-mysql/sync-dingtalk-documents-to-the-knowledge-base)。
+
+- `DINGTALK_ARCHIVE_DOWNLOAD_USER_ID` 用于审批附件授权；Storage、Drive 和存储缩略图策略使用该用户对应的 unionId。未显式配置 unionId 时，通过用户详情接口解析，应用需具备查询该成员的权限。
+- 两项配置缺省或空白均视为未配置。有值时去除首尾空白并保留字符串格式。已有固定 unionId 配置继续优先使用，程序不会自动核对它与 UserID 是否对应；更换用户时应同时移除旧的固定 unionId，或改为新用户的值。
+- 标准审批下载接口仍只传审批实例、文件 ID 和评论标志，不接收该下载用户参数。专用账号可稳定备用下载身份，但不能保证解决源用户失效、文件删除或文件权限不足等所有历史失败。
+- `.env` 从命令当前目录加载，已有进程环境变量优先，配置在进程内缓存。编辑服务器 `.env` 的已有配置行，确保定时任务、进程管理器没有覆盖旧值；下一次从项目目录启动 CLI 会读取新配置，常驻归档进程需重新启动。旧版本若尚未支持空白值，请注释或删除 UnionId 配置行。
+- 账号调整后先对一条已确认目标重试，按 `archive_status=archived`、`content_quality=original` 和实际下载结果验收。配置不会自动重置 `manual_required`，历史失败仍按下述精确目标恢复流程处理。
+
+依据：[配置示例](../../../.env.example)、[配置校验](../../../src/config/schema.ts)、[加载入口](../../../src/config/index.ts)、[CLI 身份传递](../../../src/cli/archive-attachments.ts)、[下载身份解析](../../../src/archive/dingtalk-download.ts)、[用户详情查询](../../../src/dingtalk/api-client.ts)。
+
 ## 归档步骤与一致性
 
 1. 实例写入调用清单同步；附件内容仍未下载。
