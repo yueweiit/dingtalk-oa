@@ -28,6 +28,7 @@
 | 附件 declared_size / actual_size | BIGINT | 源声明与下载字节数；原件下载时有大小比对 |
 | 附件 revision_generation / claim_generation | BIGINT | 归档版本及领取代次；结合 object_key 阻止旧任务覆盖当前结果 |
 | 附件 retired_at / 实例 deleted_at | TIMESTAMPTZ | 两种删除/退役标记，v2 下游需独立处理 |
+| 附件模板 enabled | BOOLEAN | 按 `corp_id + process_code` 开启模板附件收集。该模板未删除的审批可进入队列，见 [模板归档规则](../modules/attachment-archive/README.md#归档范围与身份) |
 | 财务 transport_evidence | TEXT[] | logistics_category、main_freight、transport_surcharge、logistics_reference |
 | 财务 source_valid / eligible_for_adoption | BOOLEAN | 有效来源与采纳候选资格；后者还要求完成状态、运输证据及排除项判断 |
 | 财务 evidence_updated_at | TIMESTAMPTZ | 汇合来源、附件、投影变化；与审批水位不同 |

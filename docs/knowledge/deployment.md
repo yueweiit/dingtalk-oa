@@ -21,7 +21,7 @@
 | npm run backfill:metadata | 仅使用本地资料、按企业分批预览审批元数据空值；显式 --apply 才写入，无钉钉调用或通知；参数与证据口径见 [人员模块](../modules/metadata-organization/README.md#审批元数据历史回填) |
 | npm run fetch / backfill | 拉取审批写数据库，消耗钉钉调用配额 |
 | npm run finance:backfill | 发现、排期、恢复财务历史；参数语义见专项文档 |
-| npm run archive:attachments | 同步清单并下载/上传附件；批量模式和精确目标模式不同 |
+| npm run archive:attachments | 同步清单、领取并下载附件；支持全局、单附件、[模板登记和模板下载](../modules/attachment-archive/README.md#开启模板归档和回补历史) |
 | npm run archive:recovery-canaries / archive:recovery-remainders | 更改历史附件队列，不是单纯诊断 |
 | npm run packing:sync-workbooks | 同步允许工作簿并提交索引刷新 |
 | check-db.ts / test-api.ts / scripts/create-db.js | 检查工具或维护脚本，不属于单元测试；执行前单独读源码确认数据库/网络副作用 |

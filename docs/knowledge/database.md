@@ -26,6 +26,7 @@ PostgreSQL + `pg` 原生参数化 SQL，没有 ORM。[连接池](../../src/db/po
 | public.ding_alert_notification | 企业+实例+预警类型+阶段+接收人唯一 | [预警迁移](../../migrations/20260915000000_create_ding_alert_notification.cjs) |
 | costing_read.allowed_process_template | 原有主键只有 process_code；手工白名单与自动注册的范围不同 | [基础归档](../../migrations/1788492000000_create_costing_archive.cjs)、[采购范围](../../migrations/20260910000000_purchase_template_scope.cjs) |
 | costing_read.attachment_archive / dingtalk_api_usage / archive_sync_health | 附件三元唯一键、桶对象键唯一；API 调用记录；归档批次状态 | [基础归档](../../migrations/1788492000000_create_costing_archive.cjs)、[诊断扩展](../../migrations/1788505200000_add_archive_diagnostics.cjs) |
+| costing_read.attachment_template_scope / attachment_template_instances / attachment_collection_instances | 企业和流程码共同启用附件收集；后两个视图分别提供启用模板实例和全部收集范围 | [模板归档迁移](../../migrations/20261117000000_add_attachment_template_scope.cjs)、[运维说明](../modules/attachment-archive/README.md#开启模板归档和回补历史) |
 | costing_read.approval_repair_request / completed_approval_refresh | 修复请求与已完成实例轮转；前者有白名单流程外键，后者企业+实例主键 | [修复](../../migrations/1788856369000_create_approval_repair_queue.cjs)、[轮转](../../migrations/20260909000000_logistics_settlement_archive.cjs) |
 | costing_read.purchase_template_scope / purchase_approval_exposure | 企业内采购模板范围及实例首次暴露时间 | [采购范围](../../migrations/20260910000000_purchase_template_scope.cjs) |
 | costing_read.financial_template_scope / financial_source_exposure / financial_template_discovery / financial_backfill_window | 财务模板、来源、名称发现及可恢复窗口 | [财务范围](../../migrations/20260910010000_financial_source_scope.cjs) |
