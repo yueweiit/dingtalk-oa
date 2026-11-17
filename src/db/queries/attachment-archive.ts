@@ -1,4 +1,4 @@
-import type { ArchiveTarget } from '../../archive/archive-target.js';
+import type { ArchiveTarget, ArchiveTemplateTarget } from '../../archive/archive-target.js';
 import type pg from 'pg';
 import { withClient, withTransaction } from '../pool.js';
 import { extractAttachmentCandidates, type AttachmentCandidate } from '../../archive/attachment-extractor.js';
@@ -56,11 +56,17 @@ export async function upsertAttachmentCandidates(candidates: AttachmentCandidate
 }
 
 // Each claim writes a distinct object: SQL fencing alone cannot stop a stale PUT.
-export async function claimPendingAttachments(limit: number, recoveryCanariesOnly = false, target?: ArchiveTarget): Promise<PendingArchive[]> {
+export async function claimPendingAttachments(
+  limit: number,
+  recoveryCanariesOnly = false,
+  target?: ArchiveTarget | Pick<ArchiveTemplateTarget, 'corpId' | 'processCode'>,
+): Promise<PendingArchive[]> {
+  const file = target && 'fileId' in target ? target : undefined;
+  const processCode = target && 'processCode' in target ? target.processCode : null;
   return withTransaction(async (client) => {
     const { rows } = await client.query(
       `WITH picked AS (
-         SELECT id FROM costing_read.attachment_archive
+         SELECT a.id FROM costing_read.attachment_archive a
           WHERE (
             archive_status = 'pending'
             OR (archive_status = 'retry'
@@ -70,9 +76,16 @@ export async function claimPendingAttachments(limit: number, recoveryCanariesOnl
             AND retired_at IS NULL
             AND attempts < 5
             AND (NOT $2::boolean OR recovery_canary)
-            AND ($3::text IS NULL OR (corp_id=$3 AND process_instance_id=$4 AND file_id=$5))
-          ORDER BY updated_at ASC, id ASC
-          FOR UPDATE SKIP LOCKED
+            AND ($3::text IS NULL OR (a.corp_id=$3 AND (
+              (a.process_instance_id=$4 AND a.file_id=$5)
+              OR (a.process_code=$6 AND EXISTS (
+                SELECT 1 FROM costing_read.attachment_template_instances i
+                WHERE i.corp_id=a.corp_id AND i.process_instance_id=a.process_instance_id
+                  AND i.process_code=a.process_code
+              ))
+            )))
+          ORDER BY a.updated_at ASC, a.id ASC
+          FOR UPDATE OF a SKIP LOCKED
           LIMIT $1
        )
        UPDATE costing_read.attachment_archive a
@@ -86,7 +99,7 @@ export async function claimPendingAttachments(limit: number, recoveryCanariesOnl
          FROM picked
         WHERE a.id = picked.id
        RETURNING a.*`,
-      [limit, recoveryCanariesOnly, target?.corpId ?? null, target?.processInstanceId ?? null, target?.fileId ?? null],
+      [limit, recoveryCanariesOnly, target?.corpId ?? null, file?.processInstanceId ?? null, file?.fileId ?? null, processCode],
     );
     return rows.map(toPendingArchive);
   });
@@ -234,6 +247,45 @@ export async function listWhitelistedInstances(): Promise<Array<{
   });
 }
 
+export async function isAttachmentTemplateEnabled(corpId: string, processCode: string): Promise<boolean> {
+  return withClient(async (client) => {
+    const { rows } = await client.query<{ enabled: boolean }>(`SELECT enabled FROM costing_read.attachment_template_scope
+      WHERE corp_id=$1 AND process_code=$2`, [corpId, processCode]);
+    return rows[0]?.enabled === true;
+  });
+}
+
+export async function enqueueTemplateAttachments(corpId: string, processCode: string): Promise<{
+  scannedCount: number;
+  candidateCount: number;
+}> {
+  const lastId = await withClient(async (client) => {
+    const { rows } = await client.query<{ last_id: string }>(`SELECT COALESCE(MAX(id), 0)::text AS last_id
+      FROM costing_read.attachment_template_instances WHERE corp_id=$1 AND process_code=$2`, [corpId, processCode]);
+    return rows[0].last_id;
+  });
+  let afterId = '0';
+  let scannedCount = 0;
+  let candidateCount = 0;
+  while (BigInt(afterId) < BigInt(lastId)) {
+    const page = await withClient(async (client) => {
+      const { rows } = await client.query<{ id: string; process_instance_id: string }>(`SELECT i.id::text, i.process_instance_id
+        FROM costing_read.attachment_template_instances i
+        WHERE i.corp_id=$1 AND i.process_code=$2 AND i.id>$3::bigint AND i.id<=$4::bigint
+        ORDER BY i.id LIMIT 200`, [corpId, processCode, afterId, lastId]);
+      return rows;
+    });
+    const last = page.at(-1);
+    if (!last) break;
+    for (const row of page) {
+      candidateCount += await synchronizeInstanceAttachments(corpId, row.process_instance_id, undefined, processCode);
+    }
+    scannedCount += page.length;
+    afterId = last.id;
+  }
+  return { scannedCount, candidateCount };
+}
+
 export async function updateArchiveHealth(params: {
   startedAt: Date;
   completed: boolean;
@@ -257,14 +309,18 @@ export async function updateArchiveHealth(params: {
 
 
 export async function synchronizeInstanceAttachments(
-  corpId: string, processInstanceId: string, client?: pg.PoolClient,
+  corpId: string, processInstanceId: string, client?: pg.PoolClient, expectedProcessCode?: string,
 ): Promise<number> {
   const run = async (c: pg.PoolClient) => {
     await c.query(`SELECT 1 FROM public.ding_approval_instance
       WHERE corp_id=$1 AND process_instance_id=$2 FOR UPDATE`, [corpId, processInstanceId]);
-    const { rows } = await c.query(`SELECT * FROM costing_read.eligible_attachment_instances
-      WHERE corp_id=$1 AND process_instance_id=$2`, [corpId, processInstanceId]);
+    const scope = expectedProcessCode === undefined
+      ? 'costing_read.attachment_collection_instances' : 'costing_read.attachment_template_instances';
+    const { rows } = await c.query(`SELECT process_code, raw_payload, form_component_values FROM ${scope}
+      WHERE corp_id=$1 AND process_instance_id=$2 AND ($3::text IS NULL OR process_code=$3)`,
+    [corpId, processInstanceId, expectedProcessCode ?? null]);
     const instance = rows[0];
+    if (expectedProcessCode !== undefined && !instance) return 0;
     const candidates = instance ? extractAttachmentCandidates({
       corpId, processInstanceId, processCode: instance.process_code,
       rawPayload: { ...instance.raw_payload, formComponentValues:
@@ -285,7 +341,7 @@ export async function retireIneligibleAttachments(): Promise<void> {
     const { rows } = await client.query<{ corp_id: string; process_instance_id: string }>(`
       SELECT DISTINCT a.corp_id, a.process_instance_id FROM costing_read.attachment_archive a
       WHERE a.retired_at IS NULL AND NOT EXISTS (
-        SELECT 1 FROM costing_read.eligible_attachment_instances i
+        SELECT 1 FROM costing_read.attachment_collection_instances i
         WHERE i.corp_id=a.corp_id AND i.process_instance_id=a.process_instance_id
       )`);
     return rows;

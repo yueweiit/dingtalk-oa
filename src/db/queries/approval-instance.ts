@@ -184,18 +184,20 @@ export async function claimCompletedApprovalRefresh(
   }
   return withTransaction(async (client) => {
     const broadScope = (await client.query("SELECT to_regclass('costing_read.completed_refresh_instances') AS relation")).rows[0].relation;
-    // Keep application rollback compatible with archives that have only the prior migration.
     const scope = broadScope ? 'costing_read.completed_refresh_instances' : 'costing_read.eligible_attachment_instances';
-    await client.query(`INSERT INTO costing_read.completed_approval_refresh(corp_id, process_instance_id)
-      SELECT corp_id, process_instance_id FROM ${scope}
+    const candidates = `SELECT corp_id, process_instance_id FROM ${scope}
       WHERE UPPER(COALESCE(status, '')) = 'COMPLETED'
+      UNION
+      SELECT corp_id, process_instance_id FROM costing_read.attachment_template_instances
+      WHERE UPPER(COALESCE(status, '')) = 'COMPLETED'`;
+    await client.query(`INSERT INTO costing_read.completed_approval_refresh(corp_id, process_instance_id)
+      ${candidates}
       ON CONFLICT (corp_id, process_instance_id) DO NOTHING`);
     const { rows } = await client.query<CompletedApprovalRefreshInstance>(`WITH picked AS (
       SELECT r.corp_id, r.process_instance_id
       FROM costing_read.completed_approval_refresh r
-      JOIN ${scope} i USING (corp_id, process_instance_id)
-      WHERE UPPER(COALESCE(i.status, '')) = 'COMPLETED'
-        AND (r.lease_until IS NULL OR r.lease_until <= clock_timestamp())
+      JOIN (${candidates}) i USING (corp_id, process_instance_id)
+      WHERE (r.lease_until IS NULL OR r.lease_until <= clock_timestamp())
         AND (r.last_checked_at IS NULL OR r.last_checked_at <= clock_timestamp() - $2 * interval '1 second')
       ORDER BY r.last_checked_at ASC NULLS FIRST, r.corp_id, r.process_instance_id
       FOR UPDATE OF r SKIP LOCKED LIMIT $1
@@ -207,7 +209,7 @@ export async function claimCompletedApprovalRefresh(
       RETURNING r.*
     )
     SELECT i.*, r.lease_generation AS refresh_generation
-    FROM claimed r JOIN ${scope} i USING (corp_id, process_instance_id)
+      FROM claimed r JOIN public.ding_approval_instance i USING (corp_id, process_instance_id)
     ORDER BY r.last_checked_at, r.corp_id, r.process_instance_id`, [limit, minIntervalSeconds]);
     return rows;
   });

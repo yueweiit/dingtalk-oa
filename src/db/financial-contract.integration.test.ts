@@ -9,12 +9,16 @@ import {registerDiscoveredFinancialTemplate} from './queries/financial-template-
 import * as financialQueries from './queries/financial-backfill.js';
 import { findBackfillTemplates } from './queries/process-template.js';
 import { claimCompletedApprovalRefresh } from './queries/approval-instance.js';
-import { claimPendingAttachments, synchronizeInstanceAttachments } from './queries/attachment-archive.js';
+import {
+  claimPendingAttachments, enqueueTemplateAttachments, isAttachmentTemplateEnabled,
+  retireIneligibleAttachments, synchronizeInstanceAttachments,
+} from './queries/attachment-archive.js';
 
 const databaseUrl = process.env.FINANCIAL_TEST_DATABASE_URL;
 const migrationsDir = fileURLToPath(new URL('../../migrations', import.meta.url));
 const migrationName = '20260910010000_financial_source_scope';
 const projectionMigration = '20260910020000_financial_source_projection';
+const attachmentTemplateMigration = '20261117000000_add_attachment_template_scope';
 let client: pg.Client;
 const category = [{ name: '服务类采购', value: '物流及运输服务' }];
 const freight = [{ name: '采购分类', value: '商品采购' }, { name: '说明', value: '国际海运费及燃油附加费' }];
@@ -43,7 +47,8 @@ describe.runIf(Boolean(databaseUrl))('broad financial contract (disposable Postg
       '20260703000003_create_ding_user_snapshot', '1788492000000_create_costing_archive',
       '1788492060000_limit_archive_to_logistics', '1788505200000_add_archive_diagnostics',
       '1788508800000_create_costing_actor_names_view', '1788856369000_create_approval_repair_queue',
-      '20260909000000_logistics_settlement_archive', '20260910000000_purchase_template_scope', migrationName, projectionMigration]) {
+      '20260909000000_logistics_settlement_archive', '20260910000000_purchase_template_scope',
+      migrationName, projectionMigration, attachmentTemplateMigration]) {
       await runner({ dbClient: client, dir: migrationsDir, file: name, checkOrder: false,
         migrationsTable: 'financial_test_migrations', direction: 'up', log: () => undefined });
     }
@@ -53,7 +58,8 @@ describe.runIf(Boolean(databaseUrl))('broad financial contract (disposable Postg
     await client.query(`TRUNCATE ding_process_template,ding_approval_instance,costing_read.allowed_process_template,
       costing_read.attachment_archive,costing_read.purchase_template_scope,costing_read.purchase_approval_exposure,
       costing_read.financial_template_scope,costing_read.financial_source_exposure,
-      costing_read.financial_template_discovery,costing_read.completed_approval_refresh,costing_read.financial_backfill_window RESTART IDENTITY CASCADE`);
+      costing_read.financial_template_discovery,costing_read.completed_approval_refresh,costing_read.financial_backfill_window,
+      costing_read.attachment_template_scope RESTART IDENTITY CASCADE`);
     await client.query(`INSERT INTO costing_read.allowed_process_template(process_code,purpose,archive_attachments)
       VALUES ('LOG','international_logistics',true), ('BUY','purchase_expense',false)`);
   });
@@ -86,6 +92,58 @@ describe.runIf(Boolean(databaseUrl))('broad financial contract (disposable Postg
     expect((await client.query('SELECT process_instance_id FROM costing_read.eligible_attachment_instances ORDER BY 1')).rows.map(r => r.process_instance_id))
       .toEqual(['category','comment','reference','surcharge','wrong-category']);
     expect((await client.query('SELECT count(*) FROM costing_read.attachment_archive WHERE retired_at IS NULL')).rows[0].count).toBe('5');
+  });
+
+  it('collects and claims regular expenses for an explicitly enabled corporation and process code', async () => {
+    await template('OPS', '运营支出');
+    await template('OPS', '运营支出', 'corp-2');
+    await template('EXPENSE', '费用支出');
+    const fields = [{ name: '凭证附件', value: JSON.stringify([{ fileId: 'form-file', fileName: 'receipt.pdf' }]) }];
+    await approval('historical', 'OPS', fields);
+    await approval('deleted', 'OPS', fields);
+    await markAsDeleted('corp-1', 'deleted');
+    await approval('regular-expense', 'EXPENSE', fields);
+    await approval('logistics', 'LOG', []);
+    expect((await client.query('SELECT process_instance_id FROM costing_read.attachment_archive')).rows)
+      .toEqual([{ process_instance_id: 'logistics' }]);
+
+    await client.query(`INSERT INTO costing_read.attachment_template_scope(corp_id,process_code)
+      VALUES ('corp-1','OPS'), ('corp-2','OPS')`);
+    await upsertInstance({ corp_id: 'corp-2', process_instance_id: 'historical', process_code: 'OPS', status: 'COMPLETED',
+      form_component_values: fields, raw_payload: { operationRecords: [{ files: [file] }] } });
+    expect(await isAttachmentTemplateEnabled('corp-1', 'OPS')).toBe(true);
+    expect(await isAttachmentTemplateEnabled('corp-1', 'EXPENSE')).toBe(false);
+    expect(await enqueueTemplateAttachments('corp-1', 'OPS')).toEqual({ scannedCount: 1, candidateCount: 2 });
+    expect(await enqueueTemplateAttachments('corp-1', 'OPS')).toEqual({ scannedCount: 1, candidateCount: 2 });
+    await approval('new-approval', 'OPS', fields);
+
+    const claimed = await claimPendingAttachments(10, false, { corpId: 'corp-1', processCode: 'OPS' });
+    expect(claimed.map(row => [row.corpId, row.processInstanceId, row.origin].join('/')).sort()).toEqual([
+      'corp-1/historical/comment', 'corp-1/historical/form', 'corp-1/new-approval/comment', 'corp-1/new-approval/form',
+    ]);
+    expect(await claimPendingAttachments(10, false, { corpId: 'corp-1', processCode: 'OPS' })).toEqual([]);
+    expect((await client.query(`SELECT corp_id, process_instance_id FROM costing_read.attachment_archive
+      WHERE archive_status='pending' ORDER BY corp_id, process_instance_id`)).rows).toEqual([
+      { corp_id: 'corp-1', process_instance_id: 'logistics' },
+      { corp_id: 'corp-2', process_instance_id: 'historical' },
+      { corp_id: 'corp-2', process_instance_id: 'historical' },
+    ]);
+    expect((await client.query('SELECT process_instance_id FROM costing_read.attachment_archives_v1')).rows)
+      .toEqual([{ process_instance_id: 'logistics' }]);
+    expect((await client.query(`SELECT eligible_for_adoption FROM costing_read.financial_sources_v1
+      WHERE corp_id='corp-1' AND process_instance_id='historical'`)).rows).toEqual([{ eligible_for_adoption: false }]);
+  });
+
+  it('includes enabled templates in completed refresh and retires attachments after disabling their scope', async () => {
+    await template('GENERAL', '通用审批');
+    await client.query(`INSERT INTO costing_read.attachment_template_scope(corp_id,process_code) VALUES ('corp-1','GENERAL')`);
+    await approval('general', 'GENERAL', []);
+    expect((await claimCompletedApprovalRefresh(10, 0)).map(row => row.process_instance_id)).toEqual(['general']);
+    await client.query(`UPDATE costing_read.attachment_template_scope SET enabled=false WHERE corp_id='corp-1' AND process_code='GENERAL'`);
+    expect(await claimPendingAttachments(10, false, { corpId: 'corp-1', processCode: 'GENERAL' })).toEqual([]);
+    await retireIneligibleAttachments();
+    expect((await client.query(`SELECT retired_at IS NOT NULL AS retired FROM costing_read.attachment_archive
+      WHERE corp_id='corp-1' AND process_instance_id='general'`)).rows).toEqual([{ retired: true }]);
   });
 
   it('accepts a financial form under an unrelated name only with transport evidence and retains invalidation', async () => {

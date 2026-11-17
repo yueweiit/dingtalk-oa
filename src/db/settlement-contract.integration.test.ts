@@ -14,6 +14,7 @@ import { upsertInstance, markAsDeleted } from './queries/approval-instance.js';
 const databaseUrl = process.env.SETTLEMENT_TEST_DATABASE_URL;
 const migrationName = '20260909000000_logistics_settlement_archive';
 const scopeMigrationName = '20260910000000_purchase_template_scope';
+const attachmentTemplateMigrationName = '20261117000000_add_attachment_template_scope';
 const migrationsDir = fileURLToPath(new URL('../../migrations', import.meta.url));
 const hasMigration = existsSync(`${migrationsDir}/${migrationName}.cjs`);
 const hasScopeMigration = existsSync(`${migrationsDir}/${scopeMigrationName}.cjs`);
@@ -48,6 +49,10 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
       await client.query('TRUNCATE costing_read.allowed_process_template CASCADE');
     }
     if (hasMigration && (await client.query("SELECT to_regclass('settlement_test_migrations') AS relation")).rows[0].relation) {
+      if ((await client.query('SELECT 1 FROM settlement_test_migrations WHERE name=$1', [attachmentTemplateMigrationName])).rowCount) {
+        await runner({ dbClient: client, dir: migrationsDir, file: attachmentTemplateMigrationName, checkOrder: false,
+          migrationsTable: 'settlement_test_migrations', direction: 'down', log: () => undefined });
+      }
       if (hasScopeMigration && (await client.query("SELECT 1 FROM settlement_test_migrations WHERE name=$1", [scopeMigrationName])).rowCount) {
         await runner({ dbClient: client, dir: migrationsDir, file: scopeMigrationName, checkOrder: false,
           migrationsTable: 'settlement_test_migrations', direction: 'down', log: () => undefined });
@@ -66,6 +71,7 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
       '1788856369000_create_approval_repair_queue',
       ...(hasMigration ? [migrationName] : []),
       ...(hasScopeMigration ? [scopeMigrationName] : []),
+      attachmentTemplateMigrationName,
     ]) {
       await runner({ dbClient: client, dir: migrationsDir, file, checkOrder: false,
         migrationsTable: 'settlement_test_migrations', direction: 'up', log: () => undefined });
@@ -73,7 +79,9 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
     await client.query('ALTER TABLE ding_approval_instance ADD COLUMN IF NOT EXISTS originator_user_name_source_instance_id varchar(128)');
   });
   beforeEach(async () => {
-    await client.query('TRUNCATE ding_user_snapshot, ding_process_template, ding_approval_instance, costing_read.allowed_process_template, costing_read.attachment_archive RESTART IDENTITY CASCADE');
+    await client.query(`TRUNCATE ding_user_snapshot, ding_process_template, ding_approval_instance,
+      costing_read.allowed_process_template, costing_read.attachment_archive,
+      costing_read.attachment_template_scope RESTART IDENTITY CASCADE`);
     if (hasMigration) await client.query('TRUNCATE costing_read.completed_approval_refresh');
     if (hasScopeMigration) await client.query('TRUNCATE costing_read.purchase_template_scope, costing_read.purchase_approval_exposure');
     await client.query(`INSERT INTO costing_read.allowed_process_template(process_code,purpose,archive_attachments)

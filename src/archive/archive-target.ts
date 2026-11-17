@@ -1,14 +1,39 @@
-export interface ArchiveTarget { corpId: string; processInstanceId: string; fileId: string }
+export interface ArchiveTarget {
+  corpId: string;
+  processInstanceId: string;
+  fileId: string;
+}
+
+export interface ArchiveTemplateTarget {
+  corpId: string;
+  processCode: string;
+  enqueueOnly: boolean;
+}
+
+const usage = 'Use --corp-id=ID with --instance-id=ID --file-id=ID, or with --process-code=CODE [--enqueue-only]';
 
 /** Fail closed: a partial or misspelled selector must never fall back to a global batch. */
-export function parseArchiveTarget(args: string[]): ArchiveTarget | undefined {
+export function parseArchiveTarget(args: string[]): ArchiveTarget | ArchiveTemplateTarget | undefined {
   if (!args.length) return undefined;
-  const values=new Map<string,string>();
-  for(const arg of args) {
-    const match=/^--(corp-id|instance-id|file-id)=(.+)$/.exec(arg);
-    if(!match || !match[2].trim() || values.has(match[1])) throw new Error('Use --corp-id=ID --instance-id=ID --file-id=ID together, exactly once');
-    values.set(match[1],match[2]);
+  const values = new Map<string, string>();
+  let enqueueOnly = false;
+  for (const arg of args) {
+    if (arg === '--enqueue-only' && !enqueueOnly) {
+      enqueueOnly = true;
+      continue;
+    }
+    const match = /^--(corp-id|instance-id|file-id|process-code)=(.+)$/.exec(arg);
+    if (!match || !match[2].trim() || values.has(match[1])) throw new Error(usage);
+    values.set(match[1], match[2]);
   }
-  if(values.size!==3) throw new Error('An exact attachment target requires corp-id, instance-id and file-id');
-  return {corpId:values.get('corp-id')!,processInstanceId:values.get('instance-id')!,fileId:values.get('file-id')!};
+
+  const corpId = values.get('corp-id');
+  const processInstanceId = values.get('instance-id');
+  const fileId = values.get('file-id');
+  const processCode = values.get('process-code');
+  if (corpId && processInstanceId && fileId && values.size === 3 && !enqueueOnly) {
+    return { corpId, processInstanceId, fileId };
+  }
+  if (corpId && processCode && values.size === 2) return { corpId, processCode, enqueueOnly };
+  throw new Error(usage);
 }

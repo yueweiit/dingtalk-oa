@@ -5,6 +5,8 @@ import { headArchivedObject, putArchivedObject } from '../archive/minio-archive.
 import { getConfig } from '../config/index.js';
 import {
   claimPendingAttachments,
+  enqueueTemplateAttachments,
+  isAttachmentTemplateEnabled,
   listWhitelistedInstances,
   markAttachmentArchived,
   markAttachmentFailed,
@@ -44,16 +46,27 @@ async function fetchAttachment(
 async function run(): Promise<void> {
   const target = parseArchiveTarget(process.argv.slice(2));
   const config = getConfig();
+  const fileTarget = target && 'fileId' in target ? target : undefined;
+  if (target && 'processCode' in target) {
+    if (!await isAttachmentTemplateEnabled(target.corpId, target.processCode)) {
+      throw new Error('[Archive] Attachment archiving is disabled for this corporation and process code.');
+    }
+    if (target.enqueueOnly) {
+      const { scannedCount, candidateCount } = await enqueueTemplateAttachments(target.corpId, target.processCode);
+      console.log(`[Archive] 扫描 ${scannedCount} 张审批，识别 ${candidateCount} 个附件引用`);
+      return;
+    }
+  }
   const startedAt = new Date();
   let scannedCount = 0;
   let processedCount = 0;
   let failedCount = 0;
   await updateArchiveHealth({ startedAt, completed: false, success: false, scannedCount, processedCount });
   try {
-    if(target) {
-      await synchronizeInstanceAttachments(target.corpId,target.processInstanceId);
-      scannedCount=1;
-    } else {
+    if (fileTarget) {
+      await synchronizeInstanceAttachments(fileTarget.corpId, fileTarget.processInstanceId);
+      scannedCount = 1;
+    } else if (!target) {
       await retireIneligibleAttachments();
       const instances = await listWhitelistedInstances();
       scannedCount = instances.length;
@@ -63,11 +76,11 @@ async function run(): Promise<void> {
     }
 
     const pending = await claimPendingAttachments(
-      target ? 1 : config.ARCHIVE_BATCH_SIZE,
+      fileTarget ? 1 : config.ARCHIVE_BATCH_SIZE,
       config.ARCHIVE_RECOVERY_CANARY_ONLY,
       target,
     );
-    if(target && !pending.length) {
+    if (fileTarget && !pending.length) {
       console.log('[Archive] Exact target was not claimed; inspect whether it is archived, ineligible, leased or awaiting retry.');
     }
     for (let index = 0; index < pending.length; index += 1) {
