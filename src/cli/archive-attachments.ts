@@ -79,8 +79,8 @@ async function run(): Promise<void> {
             downloadUserId: config.DINGTALK_ARCHIVE_DOWNLOAD_USER_ID,
             configuredUnionId: config.DINGTALK_ARCHIVE_DOWNLOAD_UNION_ID,
             api: {
-              workflowDownload: async (processInstanceId, fileId) => ({
-                uri: await getApprovalAttachmentDownloadUrl(processInstanceId, fileId),
+              workflowDownload: async (processInstanceId, fileId, includeComments) => ({
+                uri: await getApprovalAttachmentDownloadUrl(processInstanceId, fileId, includeComments),
                 headers: {},
               }),
               legacyFileUrl: getLegacyApprovalAttachmentDownload,

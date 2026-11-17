@@ -86,6 +86,25 @@ describe('DingTalk archive resolver', () => {
     expect(result.archiveMethod).toBe('legacy_dentry_auth');
   });
 
+  it.each([
+    ['form', false],
+    ['comment', true],
+  ] as const)('uses the attachment origin for %s downloads before and after authorization', async (origin, includeComments) => {
+    const workflowDownload = vi.fn()
+      .mockRejectedValueOnce(new Error('noPermission'))
+      .mockResolvedValueOnce({ uri: 'https://download.example/workflow-authorized' });
+    const result = await resolveDingTalkArchiveDownload({ ...record, origin }, {
+      downloadUserId: 'ACTIVE-USER',
+      api: api({ workflowDownload, authorizeDownload: async () => undefined }),
+    });
+
+    expect(result.archiveMethod).toBe('workflow_dentry_auth');
+    expect(workflowDownload.mock.calls).toEqual([
+      [record.processInstanceId, record.fileId, includeComments],
+      [record.processInstanceId, record.fileId, includeComments],
+    ]);
+  });
+
   it('uses a thumbnail only for images and labels it preview quality', async () => {
     const thumbnailMedia = vi.fn(async () => ({ uri: 'https://download.example/thumb' }));
     const result = await resolveDingTalkArchiveDownload(record, {

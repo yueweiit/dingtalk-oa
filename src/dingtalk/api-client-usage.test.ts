@@ -26,13 +26,19 @@ describe('DingTalk API usage accounting', () => {
     vi.spyOn(tokenManager, 'getToken').mockResolvedValue('token');
   });
 
-  it('records every successful quota-consuming request', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+  it.each([
+    { includeComments: false, body: { processInstanceId: 'instance', fileId: 'file' } },
+    { includeComments: true, body: { processInstanceId: 'instance', fileId: 'file', withCommentAttatchment: true } },
+  ])('records a successful download URL request with includeComments=$includeComments', async ({ includeComments, body }) => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       result: { downloadUri: 'https://download.example/file' },
-    }), { status: 200, headers: { 'content-type': 'application/json' } })));
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
 
-    await getApprovalAttachmentDownloadUrl('instance', 'file');
+    await expect(getApprovalAttachmentDownloadUrl('instance', 'file', includeComments))
+      .resolves.toBe('https://download.example/file');
 
+    expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toEqual(body);
     expect(recordApiUsage).toHaveBeenCalledWith(
       '/workflow/processInstances/spaces/files/urls/download',
       true,

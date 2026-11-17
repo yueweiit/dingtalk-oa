@@ -7,7 +7,7 @@ import {
 } from './download-strategies.js';
 
 export interface DingTalkArchiveApi {
-  workflowDownload: (processInstanceId: string, fileId: string) => Promise<DownloadResource>;
+  workflowDownload: (processInstanceId: string, fileId: string, includeComments: boolean) => Promise<DownloadResource>;
   legacyFileUrl: (processInstanceId: string, fileId: string) => Promise<DownloadResource>;
   legacySpaceId: (processInstanceId: string, fileId: string, userId: string) => Promise<string>;
   legacyAuthorize: (fileId: string, spaceId: string, userId: string) => Promise<void>;
@@ -57,11 +57,15 @@ export async function resolveDingTalkArchiveDownload(
     return unionId;
   };
 
+  const downloadViaWorkflow = () => api.workflowDownload(
+    record.processInstanceId, record.fileId, record.origin === 'comment',
+  );
+
   const strategies: DownloadStrategy[] = [
     {
       name: 'workflow_download',
       contentQuality: 'original',
-      run: () => api.workflowDownload(record.processInstanceId, record.fileId),
+      run: downloadViaWorkflow,
     },
     {
       name: 'legacy_file_url',
@@ -86,7 +90,7 @@ export async function resolveDingTalkArchiveDownload(
       run: async () => {
         const resolvedSpaceId = await ensureSpaceId();
         await api.authorizeDownload(record.fileId, resolvedSpaceId, downloadUserId);
-        return api.workflowDownload(record.processInstanceId, record.fileId);
+        return downloadViaWorkflow();
       },
     });
   }

@@ -334,10 +334,15 @@ export async function forecastProcess(params: {
 export async function getApprovalAttachmentDownloadUrl(
   processInstanceId: string,
   fileId: string,
+  includeComments = false,
 ): Promise<string> {
   const data = await apiCall<Record<string, unknown>>('/workflow/processInstances/spaces/files/urls/download', {
     method: 'POST',
-    body: { processInstanceId, fileId },
+    body: {
+      processInstanceId,
+      fileId,
+      ...(includeComments ? { withCommentAttatchment: true } : {}),
+    },
   });
   const result = (data.result && typeof data.result === 'object' ? data.result : data) as Record<string, unknown>;
   const uri = String(
