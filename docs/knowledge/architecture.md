@@ -40,7 +40,7 @@ flowchart LR
 ## 边界与事务
 
 - HTTP 包含健康、指标、Webhook、审批人连接器和新增的审批/附件只读 API；读取 API 不执行审批写入。数据库版本化视图继续服务已有成本读取契约。新增 [读取 API](../modules/approval-read-api/README.md) 无需系统凭据，按请求企业和可选流程筛选本地源表，分页、删除标记及附件水位独立于旧视图。
-- `processApprovalMessage` 记录事件、检查模板，然后调用 `refreshApprovalInstance → persistApprovalInstance`。事件日志的状态更新在审批事务之外。
+- `processApprovalMessage` 记录事件、检查模板，然后调用 `refreshApprovalInstance → persistApprovalInstance`。企业全模板附件开关启用时也保存本地停用模板的审批详情，但不修改模板启用标记、不执行该事件的预算和空节点预警旁路。事件日志的状态更新在审批事务之外。
 - `persistApprovalInstance` 在一个 PostgreSQL 事务内写审批实例、任务及表单字段；`upsertInstance` 同步附件清单，迁移触发器维护财务投影和时间水位。字段元数据通过 SAVEPOINT 隔离单字段失败。
 - 用户快照在提交后异步更新。空节点和预算检查在事件编排路径执行，异常被隔离；直接刷新/补录路径不会自动执行这两个预警。
 - 附件对象 PUT 与数据库清单更新不是跨系统原子事务；通过对象标识、HEAD 恢复及 claim generation 校验收敛。详见 [附件流程](../modules/attachment-archive/workflow.md)。

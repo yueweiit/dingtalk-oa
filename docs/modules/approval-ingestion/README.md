@@ -9,7 +9,7 @@
 1. Stream 接收实例/任务事件，Webhook 是另一接收入口。两者将统一消息写入 ding_event_outbox；事件 ID 优先使用源 ID，缺失时按企业、实例、事件类型及时间生成，fallback 还使用 messageId。
 2. Kafka 消息 key 为企业:实例；consumer 订阅 approval.events.raw。单条处理最多尝试 3 次，成功后提交下一 offset；失败尝试发送 DLQ 后也提交。DLQ 投递失败和无自动重放的限制见 [可靠性](../../knowledge/reliability.md)。
 3. 编排器保存企业并插入事件日志。相同企业+event_id 且已 success 才跳过；其他状态可重试。没有 event_id 的日志不能使用同等去重规则。
-4. 事件带 processCode 时，未知模板自动补建；已知 enabled=false 模板被标记 skipped，不继续获取详情。禁用检查依赖消息含模板码。
+4. 事件带 processCode 时，未知模板自动补建；已知 enabled=false 模板默认标记 skipped。若企业已开启[全部模板附件归档](../attachment-archive/README.md#开启企业全部模板和回补历史)，则继续同步该审批及附件，保留模板停用标记并跳过该事件的预算和空节点通知旁路。禁用检查依赖消息含模板码。
 5. 从钉钉读取完整详情，再将实例、任务、字段和附件清单按既有事务链保存；不是根据单条事件直接推导最终状态。
 6. 任务只对返回列表逐条 upsert；当前流程未删除详情中不再出现的旧任务。缺 taskId 时使用数组序号后备 ID，统计和状态迁移需留意。
 7. 任务状态及结果保留上游值。实例原始 JSON 和表单 JSON 留存；本地 updated_at 与下游可见性水位受迁移触发器影响。

@@ -13,7 +13,9 @@ flowchart TD
   L --> D{"相同事件已成功"}
   D -->|是| END["结束本次处理"]
   D -->|否| T{"已知模板被禁用"}
-  T -->|是| SK["日志 skipped"]
+  T -->|是| CS{"企业全模板附件开关开启"}
+  CS -->|否| SK["日志 skipped"]
+  CS -->|是，仅同步审批及附件| API
   T -->|否或无模板码| API["获取完整审批详情"]
   API --> TX["开启数据库事务"]
   TX --> I["实例 upsert 与附件清单同步"]
@@ -22,7 +24,8 @@ flowchart TD
   F --> META["本地元数据补全及独立保存点"]
   META --> COMMIT["提交事务"]
   COMMIT --> U["异步补取发起人及审批人资料，再补本实例"]
-  COMMIT --> A["空节点和预算旁路"]
+  COMMIT -->|非停用模板| A["空节点和预算旁路"]
+  COMMIT -->|停用模板仅归档| S
   A --> S["事件 success"]
   API -->|失败| FAIL["事件 failed 并抛出"]
   TX -->|主事务失败| FAIL

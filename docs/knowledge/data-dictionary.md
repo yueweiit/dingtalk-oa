@@ -30,6 +30,7 @@
 | 附件 queue_priority | SMALLINT，0/1，默认 0 | 实时详情发现的新增或变化附件为 1；历史补录为 0；完全相同的清单重放不提升。仅影响后台领取顺序，不修改对外视图列，见[优先级迁移](../../migrations/20261117010000_add_attachment_queue_priority.cjs) |
 | 附件 retired_at / 实例 deleted_at | TIMESTAMPTZ | 两种删除/退役标记，v2 下游需独立处理 |
 | 附件模板 enabled | BOOLEAN | 按 `corp_id + process_code` 开启模板附件收集。该模板未删除的审批可进入队列，见 [模板归档规则](../modules/attachment-archive/README.md#归档范围与身份) |
+| 附件企业 enabled | BOOLEAN | `attachment_corp_scope` 按 `corp_id` 开启所有模板（含未来新增）的附件收集；与模板开关为“或”关系，不改变财务金额采纳条件。默认无配置，不自动启用企业 |
 | 财务 transport_evidence | TEXT[] | logistics_category、main_freight、transport_surcharge、logistics_reference |
 | 财务 source_valid / eligible_for_adoption | BOOLEAN | 有效来源与采纳候选资格；后者还要求完成状态、运输证据及排除项判断 |
 | 财务 evidence_updated_at | TIMESTAMPTZ | 汇合来源、附件、投影变化；与审批水位不同 |

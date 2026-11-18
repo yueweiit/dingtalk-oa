@@ -21,7 +21,7 @@
 | npm run backfill:metadata | 仅使用本地资料、按企业分批预览审批元数据空值；显式 --apply 才写入，无钉钉调用或通知；参数与证据口径见 [人员模块](../modules/metadata-organization/README.md#审批元数据历史回填) |
 | npm run fetch / backfill | 拉取审批写数据库，消耗钉钉调用配额 |
 | npm run finance:backfill | 发现、排期、恢复财务历史；参数语义见专项文档 |
-| npm run archive:attachments | 同步清单、领取并下载附件；支持全局、单附件、[模板登记和模板下载](../modules/attachment-archive/README.md#开启模板归档和回补历史) |
+| npm run archive:attachments | 同步清单、领取并下载附件；支持无参数批量、单附件、模板及[企业全部模板模式](../modules/attachment-archive/README.md#开启企业全部模板和回补历史)；企业模式须显式 `--corp-id` + `--all-templates` |
 | npm run archive:recovery-canaries / archive:recovery-remainders | 更改历史附件队列，不是单纯诊断 |
 | npm run packing:sync-workbooks | 同步允许工作簿并提交索引刷新 |
 | check-db.ts / test-api.ts / scripts/create-db.js | 检查工具或维护脚本，不属于单元测试；执行前单独读源码确认数据库/网络副作用 |
@@ -77,3 +77,5 @@ outbox 默认每秒投递最多 100 条；修复和装箱 worker 默认每 5 秒
 启动会调用 ensureCorpConfigTable，后台任务可修改数据库；就绪检查还可能调用钉钉 Token 接口。不得为了阅读知识库启动服务。
 
 迁移先后依赖、不可逆范围及空库安装限制见 [数据库](database.md)。恢复方案需区分普通补录、财务窗口、修复、附件、装箱；不要默认用 migrate:down 回滚应用。仓库未提供完整生产备份恢复流程，已有专项文档中的历史测试描述不能作为当前环境通过证据。
+
+企业全部模板附件归档需要先应用 `20261118000000_add_attachment_corp_scope`，再启动新版写入服务。默认不启用任何企业；通过数据库企业开关启用，并执行一次 `--corp-id=CORP_ID --all-templates --enqueue-only` 登记本地历史引用。详细顺序和禁用语义统一见[附件模块](../modules/attachment-archive/README.md#开启企业全部模板和回补历史)。

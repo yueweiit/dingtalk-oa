@@ -11,7 +11,7 @@
 - 非财务名模板的单据也可能因“有金额字段 + 运输证据”获得持久的实例级暴露；这不自动授予整个模板的修复权限。
 - 运输证据包括明确物流类别、主运输费、运输附加费或物流引用。来源可含嵌套/JSON 字符串字段、评论；关联物流实例须同企业且精确匹配，附件不透明 ID 本身不是运输证据。
 - source_valid 排除单据撤销、取消、拒绝、删除等；不因模板删除直接失效。无效财务来源仍可读以保留审计。
-- 按财务来源规则收集新附件时要求来源有效并有运输证据。`eligible_for_adoption` 还要求 COMPLETED/FINISHED/APPROVED，并排除仅包含税费、清关或尾程的来源。普通费用模板可通过[模板归档范围](../attachment-archive/README.md#开启模板归档和回补历史)提供附件，金额采纳依照上述财务条件。
+- 按财务来源规则收集新附件时要求来源有效并有运输证据。`eligible_for_adoption` 还要求 COMPLETED/FINISHED/APPROVED，并排除仅包含税费、清关或尾程的来源。普通费用及其他模板可通过[企业或模板归档范围](../attachment-archive/README.md#归档范围与身份)提供附件；企业全部模板归档不扩大财务可读范围或金额采纳条件。
 - eligible_for_adoption 是候选提示，不能授权整单金额自动采纳；逐行分类、匹配置信度、金额归属由下游负责。
 
 依据：[发现逻辑](../../../src/jobs/financial-template-discovery.ts)、[注册查询](../../../src/db/queries/financial-template-discovery.ts)、[范围与分类 SQL](../../../migrations/20260910010000_financial_source_scope.cjs)、[投影 SQL](../../../migrations/20260910020000_financial_source_projection.cjs)。
