@@ -19,6 +19,7 @@ import type { JsonValue } from '../db/json-types.js';
 import { monitorBudgetAlertForInstance } from '../jobs/budget-alert-monitor.js';
 import { monitorEmptyApprovalNodesForInstance } from '../jobs/approval-empty-node-monitor.js';
 import { notifyAttachmentQueue } from '../archive/queue-signal.js';
+import { isAttachmentCorpEnabled } from '../db/queries/attachment-archive.js';
 
 export interface ProcessMessageParams {
   eventType: string;
@@ -140,6 +141,8 @@ export async function processApprovalMessage(params: ProcessMessageParams): Prom
       status: 'processing',
     });
 
+    // 企业附件全覆盖需要保存停用模板的详情，但不重新开启模板的通知旁路。
+    let archiveOnly = false;
     // 事件兜底发现审批模板
     if (params.processCode) {
       const existingTemplate = await findByCorpAndProcessCode(params.corpId, params.processCode);
@@ -166,15 +169,17 @@ export async function processApprovalMessage(params: ProcessMessageParams): Prom
           enabled: true,
         });
       } else if (!existingTemplate.enabled) {
-        // 模板被禁用，跳过处理
-        console.log(`[Orchestrator] 模板已禁用，跳过: ${params.processCode}`);
-        await updateEventStatus({
-          id: eventLog.id,
-          status: 'skipped',
-          processed_at: new Date(),
-          duration_ms: Date.now() - startTime,
-        });
-        return;
+        archiveOnly = await isAttachmentCorpEnabled(params.corpId);
+        if (!archiveOnly) {
+          console.log(`[Orchestrator] 模板已禁用，跳过: ${params.processCode}`);
+          await updateEventStatus({
+            id: eventLog.id,
+            status: 'skipped',
+            processed_at: new Date(),
+            duration_ms: Date.now() - startTime,
+          });
+          return;
+        }
       }
     }
 
@@ -192,24 +197,26 @@ export async function processApprovalMessage(params: ProcessMessageParams): Prom
         || (params.payload?.staffId || params.payload?.StaffId) as string | undefined,
     };
 
-    // 流程预测是通知旁路；预测或机器人异常不能影响审批归档。
-    try {
-      const emptyNodeResult = await monitorEmptyApprovalNodesForInstance(params.corpId, hydratedInstanceDetail);
-      console.log(
-        `[EmptyApprovalNode] ${params.processInstanceId}: status=${emptyNodeResult.status}, empty=${emptyNodeResult.emptyNodes.length}, sent=${emptyNodeResult.sent}${emptyNodeResult.reason ? `, reason=${emptyNodeResult.reason}` : ''}`,
-      );
-    } catch (error) {
-      console.error(`[Orchestrator] 空审批节点检查失败，不阻断归档: ${params.processInstanceId}`, error);
-    }
+    if (!archiveOnly) {
+      // 流程预测是通知旁路；预测或机器人异常不能影响审批归档。
+      try {
+        const emptyNodeResult = await monitorEmptyApprovalNodesForInstance(params.corpId, hydratedInstanceDetail);
+        console.log(
+          `[EmptyApprovalNode] ${params.processInstanceId}: status=${emptyNodeResult.status}, empty=${emptyNodeResult.emptyNodes.length}, sent=${emptyNodeResult.sent}${emptyNodeResult.reason ? `, reason=${emptyNodeResult.reason}` : ''}`,
+        );
+      } catch (error) {
+        console.error(`[Orchestrator] 空审批节点检查失败，不阻断归档: ${params.processInstanceId}`, error);
+      }
 
-    // 预算预警是通知旁路；任何预算服务或机器人异常都不能影响审批归档。
-    try {
-      const budgetAlertResult = await monitorBudgetAlertForInstance(params.corpId, hydratedInstanceDetail);
-      console.log(
-        `[BudgetAlert] ${params.processInstanceId}: status=${budgetAlertResult.status}, sent=${budgetAlertResult.sent}${budgetAlertResult.reason ? `, reason=${budgetAlertResult.reason}` : ''}`,
-      );
-    } catch (error) {
-      console.error(`[Orchestrator] 预算预警检查失败，不阻断归档: ${params.processInstanceId}`, error);
+      // 预算预警是通知旁路；任何预算服务或机器人异常都不能影响审批归档。
+      try {
+        const budgetAlertResult = await monitorBudgetAlertForInstance(params.corpId, hydratedInstanceDetail);
+        console.log(
+          `[BudgetAlert] ${params.processInstanceId}: status=${budgetAlertResult.status}, sent=${budgetAlertResult.sent}${budgetAlertResult.reason ? `, reason=${budgetAlertResult.reason}` : ''}`,
+        );
+      } catch (error) {
+        console.error(`[Orchestrator] 预算预警检查失败，不阻断归档: ${params.processInstanceId}`, error);
+      }
     }
 
     // 更新事件日志为成功

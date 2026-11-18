@@ -86,17 +86,26 @@ export async function findAllTemplates(corp_id: string): Promise<DingProcessTemp
   });
 }
 
-/** Daily overlap scans also cover discovered financial metadata that current lists omit. */
+/** Backfill covers known templates of opted-in corporations as well as financial history. */
 export async function findBackfillTemplates(corpId: string): Promise<DingProcessTemplate[]> {
   return withClient(async client => {
-    const broadScope = (await client.query("SELECT to_regclass('costing_read.financial_template_scope') AS relation")).rows[0].relation;
-    if (!broadScope) {
-      const {rows}=await client.query<DingProcessTemplate>(`SELECT * FROM ding_process_template WHERE corp_id=$1
-        AND enabled=true AND is_deleted=false ORDER BY process_code`,[corpId]);
+    const { rows: [scopes] } = await client.query<{
+      financial_scope: string | null;
+      attachment_corp_scope: string | null;
+    }>(`SELECT to_regclass('costing_read.financial_template_scope') AS financial_scope,
+      to_regclass('costing_read.attachment_corp_scope') AS attachment_corp_scope`);
+    // Keep the pre-migration fallback; this selector must not depend on an approval already existing.
+    const corpScope = scopes.attachment_corp_scope ? `EXISTS (
+      SELECT 1 FROM costing_read.attachment_corp_scope a WHERE a.corp_id=t.corp_id AND a.enabled
+    )` : 'false';
+    const localScope = `((t.enabled=true AND t.is_deleted=false) OR ${corpScope})`;
+    if (!scopes.financial_scope) {
+      const {rows}=await client.query<DingProcessTemplate>(`SELECT t.* FROM ding_process_template t WHERE t.corp_id=$1
+        AND ${localScope} ORDER BY process_code`,[corpId]);
       return rows;
     }
     const {rows}=await client.query<DingProcessTemplate>(`SELECT t.* FROM public.ding_process_template t
-      WHERE t.corp_id=$1 AND ((t.enabled=true AND t.is_deleted=false) OR EXISTS(
+      WHERE t.corp_id=$1 AND (${localScope} OR EXISTS(
         SELECT 1 FROM costing_read.financial_template_scope f WHERE f.corp_id=t.corp_id AND f.process_code=t.process_code))
       UNION ALL
       SELECT NULL::bigint,f.corp_id,f.process_code,f.template_name,false,true,NULL::text,NULL::timestamptz,

@@ -12,7 +12,7 @@ import { claimCompletedApprovalRefresh } from './queries/approval-instance.js';
 import { createAttachmentArchiveWorker } from '../jobs/attachment-archive-worker.js';
 import { listReadAttachments } from './queries/approval-read-api.js';
 import {
-  claimPendingAttachments, enqueueTemplateAttachments, isAttachmentTemplateEnabled,
+  claimPendingAttachments, enqueueCorpAttachments, enqueueTemplateAttachments, isAttachmentCorpEnabled, isAttachmentTemplateEnabled,
   retireIneligibleAttachments, synchronizeInstanceAttachments, updateArchiveHealth,
 } from './queries/attachment-archive.js';
 
@@ -22,6 +22,7 @@ const migrationName = '20260910010000_financial_source_scope';
 const projectionMigration = '20260910020000_financial_source_projection';
 const attachmentTemplateMigration = '20261117000000_add_attachment_template_scope';
 const attachmentPriorityMigration = '20261117010000_add_attachment_queue_priority';
+const attachmentCorpMigration = '20261118000000_add_attachment_corp_scope';
 let client: pg.Client;
 const category = [{ name: '服务类采购', value: '物流及运输服务' }];
 const freight = [{ name: '采购分类', value: '商品采购' }, { name: '说明', value: '国际海运费及燃油附加费' }];
@@ -51,7 +52,7 @@ describe.runIf(Boolean(databaseUrl))('broad financial contract (disposable Postg
       '1788492060000_limit_archive_to_logistics', '1788505200000_add_archive_diagnostics',
       '1788508800000_create_costing_actor_names_view', '1788856369000_create_approval_repair_queue',
       '20260909000000_logistics_settlement_archive', '20260910000000_purchase_template_scope',
-      migrationName, projectionMigration, attachmentTemplateMigration, attachmentPriorityMigration]) {
+      migrationName, projectionMigration, attachmentTemplateMigration, attachmentPriorityMigration, attachmentCorpMigration]) {
       await runner({ dbClient: client, dir: migrationsDir, file: name, checkOrder: false,
         migrationsTable: 'financial_test_migrations', direction: 'up', log: () => undefined });
     }
@@ -62,7 +63,7 @@ describe.runIf(Boolean(databaseUrl))('broad financial contract (disposable Postg
       costing_read.attachment_archive,costing_read.purchase_template_scope,costing_read.purchase_approval_exposure,
       costing_read.financial_template_scope,costing_read.financial_source_exposure,
       costing_read.financial_template_discovery,costing_read.completed_approval_refresh,costing_read.financial_backfill_window,
-      costing_read.attachment_template_scope RESTART IDENTITY CASCADE`);
+      costing_read.attachment_template_scope,costing_read.attachment_corp_scope RESTART IDENTITY CASCADE`);
     await client.query(`INSERT INTO costing_read.allowed_process_template(process_code,purpose,archive_attachments)
       VALUES ('LOG','international_logistics',true), ('BUY','purchase_expense',false)`);
   });
@@ -201,6 +202,171 @@ describe.runIf(Boolean(databaseUrl))('broad financial contract (disposable Postg
     await retireIneligibleAttachments();
     expect((await client.query(`SELECT retired_at IS NOT NULL AS retired FROM costing_read.attachment_archive
       WHERE corp_id='corp-1' AND process_instance_id='general'`)).rows).toEqual([{ retired: true }]);
+  });
+
+  it('collects existing and future templates by corporation without widening financial adoption or public costing views', async () => {
+    await template('OPS', '运营支出');
+    await template('GENERAL', '通用审批');
+    const fields = [{ name: '凭证附件', value: JSON.stringify([{ fileId: 'form-file', fileName: 'receipt.pdf' }]) }];
+    await approval('historical-ops', 'OPS', fields);
+    await approval('historical-general', 'GENERAL', []);
+    await approval('deleted', 'OPS', fields);
+    await markAsDeleted('corp-1', 'deleted');
+    await upsertInstance({ corp_id: 'corp-2', process_instance_id: 'historical-ops', process_code: 'OPS',
+      status: 'COMPLETED', raw_payload: { operationRecords: [{ files: [file] }] } });
+    const adoption = async () => (await client.query(`SELECT corp_id,process_instance_id,eligible_for_adoption
+      FROM costing_read.financial_sources_v1 ORDER BY corp_id,process_instance_id`)).rows;
+    const adoptionBefore = await adoption();
+    expect(await isAttachmentCorpEnabled('corp-1')).toBe(false);
+    await client.query(`INSERT INTO costing_read.attachment_corp_scope(corp_id,enabled) VALUES ('corp-1',true),('corp-2',false);
+      INSERT INTO costing_read.attachment_template_scope(corp_id,process_code,enabled) VALUES ('corp-1','OPS',false)`);
+    expect(await isAttachmentCorpEnabled('corp-1')).toBe(true);
+    expect(await isAttachmentCorpEnabled('corp-2')).toBe(false);
+    expect(await isAttachmentTemplateEnabled('corp-1', 'OPS')).toBe(true);
+    expect(await isAttachmentTemplateEnabled('corp-1', 'NOT-YET-CREATED')).toBe(true);
+    expect(await isAttachmentTemplateEnabled('corp-2', 'OPS')).toBe(false);
+    expect(await enqueueCorpAttachments('corp-1')).toEqual({ scannedCount: 2, candidateCount: 3 });
+    expect(await enqueueCorpAttachments('corp-1')).toEqual({ scannedCount: 2, candidateCount: 3 });
+    expect(await enqueueCorpAttachments('corp-2')).toEqual({ scannedCount: 0, candidateCount: 0 });
+
+    // A template created after opting in needs no per-template row or metadata discovery to qualify.
+    await approval('future', 'FUTURE', []);
+    await upsertInstance({ corp_id: 'corp-1', process_instance_id: 'future', process_code: 'FUTURE', status: 'COMPLETED',
+      raw_payload: { operationRecords: [{ files: [file, { fileId: 'later-comment' }] }] } }, undefined, true);
+    const manifest = await listReadAttachments({ filters: { corpId: 'corp-1' }, limit: 20 });
+    expect(manifest.items).toHaveLength(5);
+    expect(manifest.items.every(row => row.retiredAt === null)).toBe(true);
+    expect((await client.query(`SELECT process_instance_id,queue_priority FROM costing_read.attachment_archive
+      WHERE file_id='later-comment'`)).rows).toEqual([{ process_instance_id: 'future', queue_priority: 1 }]);
+    expect((await claimCompletedApprovalRefresh(10, 0)).map(row => row.process_instance_id).sort())
+      .toEqual(['future', 'historical-general', 'historical-ops']);
+    expect(await adoption()).toEqual(adoptionBefore);
+    expect((await client.query('SELECT * FROM costing_read.attachment_archives_v1')).rows).toEqual([]);
+    // v2 still follows its existing financial/approval scope; the general HTTP manifest is broader.
+    expect((await client.query('SELECT DISTINCT process_instance_id FROM costing_read.attachment_archives_v2')).rows)
+      .toEqual([{ process_instance_id: 'historical-ops' }]);
+    expect((await client.query('SELECT count(*) FROM costing_read.attachment_template_scope')).rows[0].count).toBe('1');
+  });
+
+  it('isolates all-template claims by corporation and preserves canary and failure restrictions', async () => {
+    await client.query(`INSERT INTO costing_read.attachment_corp_scope(corp_id) VALUES ('corp-1'),('corp-2')`);
+    for (const id of ['canary', 'ordinary', 'manual', 'retry']) await approval(id, 'GENERAL', []);
+    await upsertInstance({ corp_id: 'corp-2', process_instance_id: 'canary', process_code: 'GENERAL',
+      raw_payload: { operationRecords: [{ files: [file] }] } });
+    await client.query(`UPDATE costing_read.attachment_archive SET recovery_canary=true WHERE process_instance_id='canary';
+      UPDATE costing_read.attachment_archive SET archive_status='manual_required',attempts=5 WHERE process_instance_id='manual';
+      UPDATE costing_read.attachment_archive SET archive_status='retry',attempts=1 WHERE process_instance_id='retry'`);
+    const target = { corpId: 'corp-1', allTemplates: true as const };
+    expect((await claimPendingAttachments(10, true, target)).map(row => [row.corpId, row.processInstanceId]))
+      .toEqual([['corp-1', 'canary']]);
+    const claims = await Promise.all([claimPendingAttachments(10, false, target), claimPendingAttachments(10, false, target)]);
+    expect(claims.flat().map(row => [row.corpId, row.processInstanceId])).toEqual([['corp-1', 'ordinary']]);
+    await enqueueCorpAttachments('corp-1');
+    expect((await client.query(`SELECT archive_status,attempts FROM costing_read.attachment_archive
+      WHERE corp_id='corp-1' AND process_instance_id='manual'`)).rows).toEqual([{ archive_status: 'manual_required', attempts: 5 }]);
+    expect((await client.query(`SELECT archive_status FROM costing_read.attachment_archive WHERE corp_id='corp-2'`)).rows)
+      .toEqual([{ archive_status: 'pending' }]);
+  });
+
+  it('selects unsynchronized nonfinancial templates for corporate backfill without re-enabling metadata', async () => {
+    await client.query(`INSERT INTO ding_process_template(corp_id,process_code,name,enabled,is_deleted) VALUES
+      ('corp-1','ACTIVE','通用申请',true,false),
+      ('corp-1','DISABLED','通用申请',false,false),
+      ('corp-1','DELETED','通用申请',true,true),
+      ('corp-1','BOTH','通用申请',false,true),
+      ('corp-2','ACTIVE','通用申请',true,false),
+      ('corp-2','DISABLED','通用申请',false,true),
+      ('corp-3','DISABLED','通用申请',false,true);
+      INSERT INTO costing_read.attachment_corp_scope(corp_id,enabled) VALUES ('corp-1',true),('corp-2',false)`);
+    // The missing-approval case must work before any source snapshot exists.
+    expect((await client.query('SELECT count(*) FROM ding_approval_instance')).rows[0].count).toBe('0');
+    expect((await findBackfillTemplates('corp-1')).map(row => row.process_code))
+      .toEqual(['ACTIVE', 'BOTH', 'DELETED', 'DISABLED']);
+    expect((await findBackfillTemplates('corp-2')).map(row => row.process_code)).toEqual(['ACTIVE']);
+    expect(await findBackfillTemplates('corp-3')).toEqual([]);
+    await template('FUTURE', '通用申请');
+    const future = (await findBackfillTemplates('corp-1')).find(row => row.process_code === 'FUTURE');
+    expect(future).toMatchObject({ corp_id: 'corp-1', enabled: false, is_deleted: true });
+    expect((await client.query(`SELECT enabled,is_deleted FROM ding_process_template
+      WHERE corp_id='corp-1' AND process_code='BOTH'`)).rows).toEqual([{ enabled: false, is_deleted: true }]);
+    expect((await client.query('SELECT count(*) FROM costing_read.financial_template_scope')).rows[0].count).toBe('0');
+  });
+
+  it('restores normal backfill scope when corporate collection is disabled and retains financial history', async () => {
+    await client.query(`INSERT INTO ding_process_template(corp_id,process_code,name,enabled,is_deleted) VALUES
+      ('corp-1','ACTIVE','通用申请',true,false),('corp-1','DISABLED','通用申请',false,true);
+      INSERT INTO costing_read.attachment_corp_scope(corp_id) VALUES ('corp-1');
+      INSERT INTO costing_read.financial_template_scope(corp_id,process_code,template_name)
+        VALUES ('corp-1','FIN-HISTORY','历史费用'),('corp-2','OTHER-FIN','其他企业费用')`);
+    await template('OPS', '运营支出');
+    expect((await findBackfillTemplates('corp-1')).map(row => row.process_code))
+      .toEqual(['ACTIVE', 'DISABLED', 'FIN-HISTORY', 'OPS']);
+    await client.query("UPDATE costing_read.attachment_corp_scope SET enabled=false WHERE corp_id='corp-1'");
+    expect((await findBackfillTemplates('corp-1')).map(row => row.process_code))
+      .toEqual(['ACTIVE', 'FIN-HISTORY', 'OPS']);
+    await client.query("DELETE FROM costing_read.attachment_corp_scope WHERE corp_id='corp-1'");
+    expect((await findBackfillTemplates('corp-1')).map(row => row.process_code))
+      .toEqual(['ACTIVE', 'FIN-HISTORY', 'OPS']);
+  });
+
+  it('retires only records that lose all scope when corporate collection is disabled', async () => {
+    await client.query(`INSERT INTO costing_read.attachment_corp_scope(corp_id) VALUES ('corp-1'),('corp-2');
+      INSERT INTO costing_read.attachment_template_scope(corp_id,process_code) VALUES ('corp-1','KEEP')`);
+    await approval('corp-only', 'GENERAL', []);
+    await approval('explicit-template', 'KEEP', []);
+    await approval('legacy', 'LOG', []);
+    await upsertInstance({ corp_id: 'corp-2', process_instance_id: 'corp-only', process_code: 'GENERAL',
+      raw_payload: { operationRecords: [{ files: [file] }] } });
+    await client.query(`UPDATE costing_read.attachment_archive SET archive_status='archived',actual_size=3,
+      content_quality='original',sha256=repeat('a',64) WHERE corp_id='corp-1' AND process_instance_id='corp-only'`);
+    await client.query("UPDATE costing_read.attachment_corp_scope SET enabled=false WHERE corp_id='corp-1'");
+    expect(await claimPendingAttachments(10, false, { corpId: 'corp-1', allTemplates: true })).toEqual([]);
+    expect(await enqueueCorpAttachments('corp-1')).toEqual({ scannedCount: 0, candidateCount: 0 });
+    expect(await isAttachmentTemplateEnabled('corp-1', 'GENERAL')).toBe(false);
+    expect(await isAttachmentTemplateEnabled('corp-1', 'KEEP')).toBe(true);
+    expect(await retireIneligibleAttachments(100)).toBe(1);
+    expect((await client.query(`SELECT corp_id,process_instance_id FROM costing_read.attachment_archive
+      WHERE retired_at IS NULL ORDER BY corp_id,process_instance_id`)).rows).toEqual([
+      { corp_id: 'corp-1', process_instance_id: 'explicit-template' },
+      { corp_id: 'corp-1', process_instance_id: 'legacy' },
+      { corp_id: 'corp-2', process_instance_id: 'corp-only' },
+    ]);
+    expect((await client.query(`SELECT archive_status,actual_size,sha256 FROM costing_read.attachment_archive
+      WHERE retired_at IS NOT NULL`)).rows).toEqual([{ archive_status: 'archived', actual_size: '3', sha256: 'a'.repeat(64) }]);
+  });
+
+  it('rolls corporate scope down and up without changing archived evidence or public view columns', async () => {
+    await client.query(`INSERT INTO costing_read.attachment_corp_scope(corp_id) VALUES ('corp-1')`);
+    await approval('retained', 'GENERAL', []);
+    await client.query(`UPDATE costing_read.attachment_archive SET archive_status='archived',content_quality='original',
+      actual_size=17,sha256=repeat('a',64),archived_at=clock_timestamp()`);
+    const snapshot = async () => (await client.query('SELECT to_jsonb(a) AS evidence FROM costing_read.attachment_archive a')).rows;
+    const columns = async () => (await client.query(`SELECT c.relname,a.attname,a.atttypid,a.attnum
+      FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname='costing_read' AND c.relname IN ('attachment_archives_v1','attachment_archives_v2','financial_sources_v1')
+        AND a.attnum>0 AND NOT a.attisdropped ORDER BY c.relname,a.attnum`)).rows;
+    const evidenceBefore = await snapshot();
+    const columnsBefore = await columns();
+    const migrate = (direction: 'up' | 'down') => runner({ dbClient: client, dir: migrationsDir,
+      file: attachmentCorpMigration, checkOrder: false, migrationsTable: 'financial_test_migrations', direction, log: () => undefined });
+    await migrate('down');
+    try {
+      expect((await client.query('SELECT * FROM costing_read.attachment_template_instances')).rows).toEqual([]);
+      expect(await findBackfillTemplates('corp-1')).toEqual([]);
+      expect(await snapshot()).toEqual(evidenceBefore);
+      expect(await columns()).toEqual(columnsBefore);
+    } finally { await migrate('up'); }
+    expect(await snapshot()).toEqual(evidenceBefore);
+    expect(await columns()).toEqual(columnsBefore);
+    expect(await isAttachmentCorpEnabled('corp-1')).toBe(false);
+  });
+
+  it('does not grant corporate scope management to the costing reader and rejects empty corporation IDs', async () => {
+    expect((await client.query(`SELECT
+      has_table_privilege('costing_reader','costing_read.attachment_corp_scope','SELECT') AS read,
+      has_table_privilege('costing_reader','costing_read.attachment_corp_scope','INSERT,UPDATE,DELETE') AS write`)).rows)
+      .toEqual([{ read: false, write: false }]);
+    await expect(client.query("INSERT INTO costing_read.attachment_corp_scope(corp_id) VALUES (' ')")).rejects.toMatchObject({ code: '23514' });
   });
 
   it('automatically publishes retirement to incremental readers without another source refresh or CLI run', async () => {

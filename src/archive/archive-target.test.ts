@@ -16,6 +16,13 @@ describe('attachment archive targets', () => {
       .toEqual({ corpId: 'example', processCode: 'OPS', enqueueOnly: true });
   });
 
+  it('requires an explicit all-templates selector for corporation-wide enqueue and download', () => {
+    const scope = ['--corp-id=example', '--all-templates'];
+    expect(parseArchiveTarget(scope)).toEqual({ corpId: 'example', allTemplates: true, enqueueOnly: false });
+    expect(parseArchiveTarget([...scope, '--enqueue-only']))
+      .toEqual({ corpId: 'example', allTemplates: true, enqueueOnly: true });
+  });
+
   it.each([
     { args: ['--file-id=file'] },
     { args: ['--corp-id=example', '--instance-id=approval', '--file-id='] },
@@ -23,6 +30,12 @@ describe('attachment archive targets', () => {
     { args: ['--flie-id=typo'] },
     { args: ['--process-code=OPS'] },
     { args: ['--enqueue-only'] },
+    { args: ['--corp-id=example'] },
+    { args: ['--all-templates'] },
+    { args: ['--corp-id= ', '--all-templates'] },
+    { args: ['--corp-id=example', '--all-templates', '--all-templates'] },
+    { args: ['--corp-id=example', '--all-templates', '--process-code=OPS'] },
+    { args: ['--corp-id=example', '--all-templates', '--instance-id=approval', '--file-id=file'] },
     { args: ['--corp-id=example', '--process-code=OPS', '--file-id=file'] },
     { args: ['--corp-id=example', '--process-code=OPS', '--enqueue-only', '--enqueue-only'] },
   ])('rejects invalid arguments $args', ({ args }) => expect(() => parseArchiveTarget(args)).toThrow());

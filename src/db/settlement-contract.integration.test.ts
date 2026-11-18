@@ -9,6 +9,7 @@ import { listWhitelistedInstances, claimPendingAttachments, markAttachmentArchiv
 import { closePool } from './pool.js';
 import * as approvalQueries from './queries/approval-instance.js';
 import { upsertInstance, markAsDeleted } from './queries/approval-instance.js';
+import { findBackfillTemplates } from './queries/process-template.js';
 
 // Only run against an explicitly supplied disposable local database.
 const databaseUrl = process.env.SETTLEMENT_TEST_DATABASE_URL;
@@ -16,6 +17,7 @@ const migrationName = '20260909000000_logistics_settlement_archive';
 const scopeMigrationName = '20260910000000_purchase_template_scope';
 const attachmentTemplateMigrationName = '20261117000000_add_attachment_template_scope';
 const attachmentPriorityMigrationName = '20261117010000_add_attachment_queue_priority';
+const attachmentCorpMigrationName = '20261118000000_add_attachment_corp_scope';
 const migrationsDir = fileURLToPath(new URL('../../migrations', import.meta.url));
 const hasMigration = existsSync(`${migrationsDir}/${migrationName}.cjs`);
 const hasScopeMigration = existsSync(`${migrationsDir}/${scopeMigrationName}.cjs`);
@@ -50,6 +52,10 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
       await client.query('TRUNCATE costing_read.allowed_process_template CASCADE');
     }
     if (hasMigration && (await client.query("SELECT to_regclass('settlement_test_migrations') AS relation")).rows[0].relation) {
+      if ((await client.query('SELECT 1 FROM settlement_test_migrations WHERE name=$1', [attachmentCorpMigrationName])).rowCount) {
+        await runner({ dbClient: client, dir: migrationsDir, file: attachmentCorpMigrationName, checkOrder: false,
+          migrationsTable: 'settlement_test_migrations', direction: 'down', log: () => undefined });
+      }
       if ((await client.query('SELECT 1 FROM settlement_test_migrations WHERE name=$1', [attachmentPriorityMigrationName])).rowCount) {
         await runner({ dbClient: client, dir: migrationsDir, file: attachmentPriorityMigrationName, checkOrder: false,
           migrationsTable: 'settlement_test_migrations', direction: 'down', log: () => undefined });
@@ -78,6 +84,7 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
       ...(hasScopeMigration ? [scopeMigrationName] : []),
       attachmentTemplateMigrationName,
       attachmentPriorityMigrationName,
+      attachmentCorpMigrationName,
     ]) {
       await runner({ dbClient: client, dir: migrationsDir, file, checkOrder: false,
         migrationsTable: 'settlement_test_migrations', direction: 'up', log: () => undefined });
@@ -87,13 +94,31 @@ describe.runIf(Boolean(databaseUrl))('settlement read contract (disposable Postg
   beforeEach(async () => {
     await client.query(`TRUNCATE ding_user_snapshot, ding_process_template, ding_approval_instance,
       costing_read.allowed_process_template, costing_read.attachment_archive,
-      costing_read.attachment_template_scope RESTART IDENTITY CASCADE`);
+      costing_read.attachment_template_scope, costing_read.attachment_corp_scope RESTART IDENTITY CASCADE`);
     if (hasMigration) await client.query('TRUNCATE costing_read.completed_approval_refresh');
     if (hasScopeMigration) await client.query('TRUNCATE costing_read.purchase_template_scope, costing_read.purchase_approval_exposure');
     await client.query(`INSERT INTO costing_read.allowed_process_template(process_code,purpose,archive_attachments)
       VALUES ('LOG','international_logistics',true),('BUY','purchase_expense',false),('OTHER','other',false)`);
   });
   afterAll(async () => { await closePool(); await client?.end(); });
+
+  it('supports corporate backfill scope without the financial schema and preserves legacy fallback', async () => {
+    expect((await client.query("SELECT to_regclass('costing_read.financial_template_scope') AS relation")).rows[0].relation).toBeNull();
+    await client.query(`INSERT INTO ding_process_template(corp_id,process_code,name,enabled,is_deleted) VALUES
+      ('corp-1','ACTIVE','通用申请',true,false),('corp-1','DISABLED','通用申请',false,true),
+      ('corp-2','DISABLED','通用申请',false,true);
+      INSERT INTO costing_read.attachment_corp_scope(corp_id) VALUES ('corp-1')`);
+    expect((await findBackfillTemplates('corp-1')).map(row => row.process_code)).toEqual(['ACTIVE', 'DISABLED']);
+    expect(await findBackfillTemplates('corp-2')).toEqual([]);
+    await client.query("UPDATE costing_read.attachment_corp_scope SET enabled=false WHERE corp_id='corp-1'");
+    expect((await findBackfillTemplates('corp-1')).map(row => row.process_code)).toEqual(['ACTIVE']);
+    const migrate = (direction: 'up' | 'down') => runner({ dbClient: client, dir: migrationsDir,
+      file: attachmentCorpMigrationName, checkOrder: false, migrationsTable: 'settlement_test_migrations', direction, log: () => undefined });
+    await migrate('down');
+    try {
+      expect((await findBackfillTemplates('corp-1')).map(row => row.process_code)).toEqual(['ACTIVE']);
+    } finally { await migrate('up'); }
+  });
 
 
   it.each(categoryCases)('classifies the approved category contract: $description', async (testCase) => {

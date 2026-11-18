@@ -3,7 +3,9 @@ import { archiveQueuedAttachment } from '../archive/archive-runtime.js';
 import { getConfig } from '../config/index.js';
 import {
   claimPendingAttachments,
+  enqueueCorpAttachments,
   enqueueTemplateAttachments,
+  isAttachmentCorpEnabled,
   isAttachmentTemplateEnabled,
   listWhitelistedInstances,
   markAttachmentFailed,
@@ -19,6 +21,16 @@ async function run(): Promise<void> {
   const target = parseArchiveTarget(process.argv.slice(2));
   const config = getConfig();
   const fileTarget = target && 'fileId' in target ? target : undefined;
+  if (target && 'allTemplates' in target) {
+    if (!await isAttachmentCorpEnabled(target.corpId)) {
+      throw new Error('ATTACHMENT_CORP_SCOPE_DISABLED');
+    }
+    if (target.enqueueOnly) {
+      const { scannedCount, candidateCount } = await enqueueCorpAttachments(target.corpId);
+      console.log(`[Archive] 扫描 ${scannedCount} 张审批，识别 ${candidateCount} 个附件引用`);
+      return;
+    }
+  }
   if (target && 'processCode' in target) {
     if (!await isAttachmentTemplateEnabled(target.corpId, target.processCode)) {
       throw new Error('[Archive] Attachment archiving is disabled for this corporation and process code.');
