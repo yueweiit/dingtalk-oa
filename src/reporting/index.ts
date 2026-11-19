@@ -10,6 +10,7 @@ const querySchema = z.object({
   corpId: z.string().trim().min(1).max(64),
   startMonth: month,
   endMonth: month,
+  includePayroll: z.literal('1').optional(),
 }).strict().refine(({ startMonth, endMonth }) => {
   const ordinal = (value: string) => Number(value.slice(0, 4)) * 12 + Number(value.slice(5));
   const span = ordinal(endMonth) - ordinal(startMonth);
@@ -38,12 +39,13 @@ export function createOperatingExpenseRoutes(deps: Dependencies) {
       }
       const query = querySchema.safeParse(request.query);
       if (!query.success) return reply.code(400).send({ success: false, code: 'INVALID_REQUEST' });
-      const { corpId, startMonth, endMonth } = query.data;
+      const { corpId, startMonth, endMonth, includePayroll } = query.data;
       if (corpId !== deps.corpId) return reply.code(403).send({ success: false, code: 'FORBIDDEN' });
       try {
-        const forms = await deps.readForms(corpId, deps.processCode);
+        const range = { startMonth, endMonth };
+        const forms = await deps.readForms(corpId, deps.processCode, includePayroll ? range : undefined);
         return { success: true, corpId, startMonth, endMonth,
-          ...summarizeOperatingExpenses(forms, { startMonth, endMonth }) };
+          ...summarizeOperatingExpenses(forms, range, Boolean(includePayroll)) };
       } catch {
         request.log.error({ resource: 'operating-expenses' }, 'Operating expense read failed');
         return reply.code(503).send({ success: false, code: 'OPERATING_EXPENSE_READ_UNAVAILABLE' });

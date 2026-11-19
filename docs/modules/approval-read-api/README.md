@@ -110,12 +110,14 @@ curl --get 'https://oa.example.com/api/v1/approvals' \
 
 `GET /api/v1/reporting/operating-expenses` 供 FIFO 后端读取 OA 月度费用。查询参数 `corpId`、`startMonth`、`endMonth` 都必填，月份为 `YYYY-MM`，包含起止月份，单次最多 12 个月。配置 `OPERATING_EXPENSE_API_CORP_ID` 和 `OPERATING_EXPENSE_API_TOKEN` 后启用，凭据使用独立随机值，允许 32–256 位字母、数字、下划线或连字符，通过 `Authorization: Bearer …` 发送。企业必须与服务配置一致。模板由 `OPERATING_EXPENSE_API_PROCESS_CODE` 指定，默认沿用 FIFO 的运营支出流程码。接入前核对实际企业、模板、组件及人民币口径。
 
-成功响应包含 `success`、`corpId`、`startMonth`、`endMonth`、`data`、`warnings`。每行含 `expenseType`、`month`、`departmentName`、`amount`、`currency`、`approvalCount`。金额为十进制字符串，三个科目沿用 FIFO 的人民币口径。单数按审批实例在各汇总组计一次。
+成功响应包含 `success`、`corpId`、`startMonth`、`endMonth`、`data`、`warnings`。每行含 `expenseType`、`month`、`departmentName`、`amount`、`currency`、`approvalCount`。金额为人民币十进制字符串。单数按审批实例在各汇总组计一次。请求附加 `includePayroll=1` 时额外返回个税、社保公积金公司部分及其警示，省略时返回原三类费用。
 
 | expenseType | 汇总口径 |
 | --- | --- |
 | office_space | 按申请月份汇总指定办公明细组件中拉丁购部门的租金与电费，`departmentName` 为 null。 |
 | china_salary | 按明细部门汇总工资中国。优先取费用所属月份，缺失时识别事项说明中明确关联工资的完整年月，如「2026年10月薪资」。仅提到参考月份时仍按申请月份。 |
+| individual_income_tax | 按北京时间的审批发起月（`create_time`）归入上一自然月，含跨年。优先读取“薪酬税费总支出”分部门表。专表为空或只有空部门和默认零时读取通用明细。已选部门且金额为零的行属于有效填报。 |
+| employer_contributions | 按北京时间的审批发起当月和明细部门，只取“社保+公积金（公司）”。当前专表为 `TableField_G2ELEALN0S80`，公司金额组件为 `MoneyField_IR71DYOSO8O0`。同一行的个人金额和总金额均不参与求和。 |
 | shared_admin | 按费用所属月份和明细部门汇总，每张单对每个不同部门计一次原金额。所属月份缺失时从事项说明识别唯一月份，工资单上的平摊费用沿用该单注明的工资所属月。 |
 
 待核对记录含 `expenseType`、`processInstanceId` 和 `departmentNames`，办公费用适用于均摊范围，其部门数组为空。
@@ -125,6 +127,9 @@ curl --get 'https://oa.example.com/api/v1/approvals' \
 | `EXPENSE_MONTH_UNRESOLVED` | 分摊费用所属月份无法确定，相关金额留待核对。 |
 | `APPLICATION_MONTH_UNRESOLVED` | 办公费用或工资的归属月份无法确定，相关金额留待核对。工资注明的月份无效或存在冲突时沿用此警示码。按申请日期归月时，历史申请日期明确指向查询区间以外的记录跳过。 |
 | `EXPENSE_CURRENCY_UNSUPPORTED` | 金额的币种明确为非人民币、无法识别或信息冲突时排除对应金额，附 `month`。优先使用金额和明细行的币种信息，再取表单币种。无币种信息的历史金额沿用人民币口径。 |
+| `PAYROLL_DETAIL_UNRESOLVED` | 个税或社保公积金的部门缺失、多选或身份冲突，目标金额缺失、有歧义或超过支持精度时，排除该行并返回所属月。同单其余有效行继续计入。部门可识别时只提示相应部门，归属未知时 `departmentNames` 为空。缺少发起月使用 `APPLICATION_MONTH_UNRESOLVED`。 |
+
+个税和公司缴费可读取行数组，以及 `rowValue`、`values`、`value` 包装的明细。优先采用 `details` 中的实际填写行，必要时从同表 `value` 按唯一行号或部门补齐。两种表示只计算一次。同一店铺实际填写的多行仍分别计入。
 
 待核对记录随已确认的汇总返回。所有候选月份都能确定且全部在查询区间外时跳过。仍可能影响查询区间时，由 FIFO 按店铺提示核对。查询读取指定企业和模板下已通过、未删除的本地审批。FIFO 保留启用店铺均摊、部门名匹配、人工薪资与费用台账的核算规则。
 

@@ -29,6 +29,132 @@ async function setup(readForms = vi.fn(async () => [] as ReturnType<typeof form>
 afterEach(async () => { await server?.close(); });
 
 describe('monthly operating expenses', () => {
+  it('attributes tax to the previous month and housing fund to the submission month, once per department', async () => {
+    const tax = [{ name: fields.management, value: '税费Impuestos' }, { name: '税费Impuestos', value: '薪资税/个税Renta' }];
+    const fund = { name: fields.management, value: '社保公积金seguridad social y fondo de vivienda' };
+    const fundTable = { id: 'TableField_G2ELEALN0S80', value: [ { rowValue: [
+      { label: '部门', value: '店铺 A' }, { key: 'MoneyField_6TQM4CNAHYO0', label: '社保+公积金（个人）', value: '900' },
+      { key: 'MoneyField_X5KBWAODJ1S0', label: '总金额（元）', value: '1023.10' },
+      { key: 'MoneyField_IR71DYOSO8O0', label: '社保+公积金（公司）SS + Vivienda (Emp.)', value: '123.10' },
+    ] } ] };
+    const generic = { name: '明细detalle', value: JSON.stringify([row('店铺 A', 'one', '', '999.99')]) };
+    const approvals = [
+      { ...form('tax', [...tax, applicationDate, { name: '费用所属月份', value: '2027-01' }, generic,
+        { name: '薪酬税费总支出(分部门)', details: [
+          [{ id: 'DepartmentField_D', value: '店铺 A' }, { id: 'MoneyField_T', value: '30.99' }],
+          [{ id: 'DepartmentField_D', value: '店铺 A' }, { id: 'MoneyField_T', value: '-0.09' }],
+          [{ id: 'DepartmentField_D', value: '店铺 B' }, { id: 'MoneyField_T', value: '91' }],
+        ] }] ), submittedMonth: '2027-01' },
+      { ...form('tax-generic', [...tax, { name: '薪酬税费总支出', value: [{ rowValue: [] }] },
+        { ...generic, value: [row('店铺 A', 'one', '', '2.01')] }]), submittedMonth: '2027-01' },
+      { ...form('fund', [fund, fundTable, generic, { name: '费用所属月份', value: '2026-11' }]), submittedMonth: '2026-12' },
+      { ...form('jan-fund', [fund, fundTable]), submittedMonth: '2027-01' },
+      { ...form('nov-tax', [...tax, generic]), submittedMonth: '2026-11' },
+      { ...form('not-tax', [{ name: '税费Impuestos', value: '企业所得税' }, { name: '事项说明', value: '个税' }, generic]), submittedMonth: '2027-01' },
+    ];
+    const { server, readForms } = await setup(vi.fn(async () => approvals));
+    const december = '?corpId=corp-1&startMonth=2026-12&endMonth=2026-12';
+    expect((await server.inject({ url: path + december, headers })).json().data).toEqual([]);
+    const response = (await server.inject({ url: path + december + '&includePayroll=1', headers })).json();
+    expect(readForms).toHaveBeenLastCalledWith('corp-1', 'PROC-1', { startMonth: '2026-12', endMonth: '2026-12' });
+    expect(response.warnings).toEqual([]);
+    expect(response.data).toEqual([
+      { expenseType: 'employer_contributions', month: '2026-12', departmentName: '店铺 A', amount: '123.10', currency: 'CNY', approvalCount: 1 },
+      { expenseType: 'individual_income_tax', month: '2026-12', departmentName: '店铺 A', amount: '32.91', currency: 'CNY', approvalCount: 2 },
+      { expenseType: 'individual_income_tax', month: '2026-12', departmentName: '店铺 B', amount: '91', currency: 'CNY', approvalCount: 1 },
+    ]);
+  });
+
+  it('scopes uncertain payroll details to their stores and excludes employee contributions and foreign amounts', async () => {
+    const fund = { name: fields.management, value: '社保公积金' };
+    const detail = (shop: string, column: string, value: string, currency = 'CNY') => ({ rowValue: [
+      { label: '部门', value: shop }, { label: column, value, currency },
+    ] });
+    const forms = [
+      { ...form('fund', [fund, { id: 'TableField_G2ELEALN0S80', value: [
+        detail('店铺 A', '社保+公积金（公司）', '30.80'), detail('店铺 B', '社保+公积金（个人）', '100'),
+        detail('店铺 B', '总金额（元）', '120'), detail('店铺 C', '社保+公积金（公司）', '10', 'MXN'),
+        detail('店铺 D', '社保+公积金（公司）', '待核对'),
+        detail('店铺 D', '社保+公积金（公司）', '1e101'),
+      ] }]), submittedMonth: '2026-10' },
+      form('unknown-date', [{ name: '税费Impuestos', value: '个税' }, { name: '明细', value: [row('店铺 A', 'one', '', '99')] }]),
+    ];
+    const { server } = await setup(vi.fn(async () => forms));
+    const response = (await server.inject({ url: path + '?' + query + '&includePayroll=1', headers })).json();
+    expect(response.data).toEqual([{ expenseType: 'employer_contributions', month: '2026-10', departmentName: '店铺 A', amount: '30.80', currency: 'CNY', approvalCount: 1 }]);
+    expect(response.warnings).toEqual([
+      { code: 'EXPENSE_CURRENCY_UNSUPPORTED', month: '2026-10', expenseType: 'employer_contributions', departmentNames: ['店铺 C'], processInstanceId: 'fund' },
+      { code: 'PAYROLL_DETAIL_UNRESOLVED', month: '2026-10', expenseType: 'employer_contributions', departmentNames: ['店铺 B', '店铺 D'], processInstanceId: 'fund' },
+      { code: 'APPLICATION_MONTH_UNRESOLVED', expenseType: 'individual_income_tax', departmentNames: ['店铺 A'], processInstanceId: 'unknown-date' },
+    ]);
+  });
+
+  it('resolves a single store, counts mirrored rows once and keeps valid payroll beside malformed rows', async () => {
+    const ids = [{ id: '1', name: '店 A' }, { id: '2', name: '店 B' }];
+    const cells = (department: unknown, amount: unknown, metadata = {}) => [
+      { id: 'DepartmentField_store', value: department, ...metadata }, { id: 'MoneyField_tax', value: amount },
+    ];
+    const tax = (id: string, value: unknown, details?: unknown, dedicated?: unknown) => ({
+      ...form(id, [{ name: '税费Impuestos', value: '个税' },
+        { name: '明细detalle', value: JSON.stringify(value), details },
+        ...(dedicated ? [{ name: '薪酬税费总支出', value: [{ rowValue: dedicated }] }] : []),
+      ]), submittedMonth: '2026-11',
+    });
+    const approvals = [
+      tax('single', [{ values: cells(JSON.stringify(ids.slice(0, 1)), '100', { extendValue: [ids[0]] }) }]),
+      tax('ids', [{ rowValue: [], value: cells('2', '20', { extValue: JSON.stringify(ids[1]) }) }]),
+      tax('ambiguous', [{ rowValue: cells('', '700', { extendValue: ids }) }]),
+      tax('id-only', [{ rowValue: cells('999', '400') }]),
+      tax('conflict', [{ rowValue: cells('店 A', '800', { extValue: ids[1] }) }]),
+      tax('mirrors', [{ rowValue: cells('店 A', null) }, { rowValue: cells('店 B', '5') }],
+        [{ value: cells('店 A', '4') }, { values: cells('店 B', null) }]),
+      tax('twice-in-one-store', { rows: [{ values: cells('店 A', '1') }, { value: cells('店 A', '1') }] },
+        [cells('店 A', '1'), cells('店 A', '1')]),
+      tax('fallback', [{ rowValue: cells('店 A', '10') }], undefined, cells('[]', '0.00')),
+      tax('real-zero', [{ rowValue: cells('店 A', '99') }], undefined, cells('店 B', 0)),
+      tax('no-shop', [{ rowValue: cells('店 A', '99') }], undefined, cells('', '77')),
+      tax('precision', [{ rowValue: cells('店 A', '1e101') }, { rowValue: cells('店 A', '0.50') },
+        { rowValue: cells('店 B', 9007199254740992) }]),
+    ];
+    const { server } = await setup(vi.fn(async () => approvals));
+    const reply = await server.inject({ url: path + '?' + query + '&includePayroll=1', headers });
+    expect(reply.statusCode).toBe(200);
+    const { data, warnings } = reply.json();
+    expect(data).toEqual([
+      { month: '2026-10', expenseType: 'individual_income_tax', departmentName: '店 A', currency: 'CNY', amount: '116.50', approvalCount: 5 },
+      { month: '2026-10', expenseType: 'individual_income_tax', departmentName: '店 B', currency: 'CNY', amount: '25', approvalCount: 3 },
+    ]);
+    expect(warnings).toEqual(['ambiguous', 'id-only', 'conflict', 'no-shop', 'precision'].map(processInstanceId => ({
+      processInstanceId, month: '2026-10', expenseType: 'individual_income_tax', code: 'PAYROLL_DETAIL_UNRESOLVED',
+      departmentNames: processInstanceId === 'precision' ? ['店 A', '店 B'] : [],
+    })));
+  });
+
+  it('matches reordered rows by number and preserves currency without guessing between duplicate departments', async () => {
+    const detail = (value: string | null, rowNumber?: number, metadata = {}) => ({
+      rowNumber, values: [{ label: '部门', value: '店 A' }, { label: '金额', value, ...metadata }],
+    });
+    const tax = (id: string, rows: unknown[], details?: unknown[]) => ({
+      ...form(id, [{ name: '税费', value: '个税' }, { name: '明细', value: { rows }, details }]),
+      submittedMonth: '2026-11',
+    });
+    const { server } = await setup(vi.fn(async () => [
+      tax('ordered', [detail('3', 2), detail('8', 1)], [detail('8', 1), detail(null, 2)]),
+      tax('unpaired', [detail('10'), detail('20')], [detail('10'), detail(null)]),
+      tax('old-only', [detail('2')]),
+      tax('currency', [detail('40', undefined, { currency: 'USD' })], [detail('40')]),
+    ]));
+    const response = await server.inject({ url: path + '?' + query + '&includePayroll=1', headers });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toEqual([{
+      expenseType: 'individual_income_tax', month: '2026-10', departmentName: '店 A', amount: '23', currency: 'CNY', approvalCount: 3,
+    }]);
+    expect(response.json().warnings).toEqual([
+      { expenseType: 'individual_income_tax', month: '2026-10', processInstanceId: 'unpaired', code: 'PAYROLL_DETAIL_UNRESOLVED', departmentNames: ['店 A'] },
+      { expenseType: 'individual_income_tax', month: '2026-10', processInstanceId: 'currency', code: 'EXPENSE_CURRENCY_UNSUPPORTED', departmentNames: ['店 A'] },
+    ]);
+  });
+
   it('restricts the credential to its configured enterprise and validates the inclusive range', async () => {
     const { server, readForms } = await setup();
     const fetch = (params: string, auth = headers) => server.inject({ url: path + '?' + params, headers: auth });
@@ -39,6 +165,7 @@ describe('monthly operating expenses', () => {
       query.replace('2026-10', '2026-12'),
       query.replace('2026-10', '2026-00'),
       query + '&processCode=OTHER',
+      query + '&includePayroll=2',
     ]) {
       expect((await fetch(badQuery)).statusCode).toBe(400);
     }
@@ -82,7 +209,7 @@ describe('monthly operating expenses', () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers['cache-control']).toBe('no-store');
     expect(readForms).toHaveBeenCalledOnce();
-    expect(readForms).toHaveBeenCalledWith('corp-1', 'PROC-1');
+    expect(readForms).toHaveBeenCalledWith('corp-1', 'PROC-1', undefined);
     expect(response.json()).toEqual({
       success: true, corpId: 'corp-1', startMonth: '2026-10', endMonth: '2026-11',
       data: [
